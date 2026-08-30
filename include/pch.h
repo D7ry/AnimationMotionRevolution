@@ -10,6 +10,21 @@
 #include <spdlog/sinks/msvc_sink.h>
 #endif
 
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <map>
+#include <numbers>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
 #define DLLEXPORT __declspec(dllexport)
 
 using namespace std::literals;

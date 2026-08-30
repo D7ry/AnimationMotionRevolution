@@ -1,208 +1,34 @@
 {
-    "version": 2,
-    "cmakeMinimumRequired": {
-        "major": 3,
-        "minor": 21,
-        "patch": 0
-    },
-    "configurePresets": [
-        {
-            "name": "base",
-            "hidden": true,
-            "cacheVariables": {
-                "CMAKE_CXX_FLAGS": "$env{COMMONLIBSSE_COMPILER} $env{COMMONLIBSSE_PLATFORM} $env{COMMONLIBSSE_TEXT} $env{RUNTIME_DISABLE_FLAGS}"
-            }
-        },
-        {
-            "name": "vcpkg",
-            "hidden": true,
-            "cacheVariables": {
-                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-windows-skse",
-                "VCPKG_HOST_TRIPLET": "x64-windows-skse",
-                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake",
-                "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-            }
-        },
-        {
-            "name": "win32",
-            "hidden": true,
-            "environment": {
-                "COMMONLIBSSE_PLATFORM": "-DWIN32_LEAN_AND_MEAN -DNOMINMAX"
-            }
-        },
-        {
-            "name": "win32-unicode",
-            "hidden": true,
-            "inherits": "win32",
-            "environment": {
-                "COMMONLIBSSE_TEXT": "-DUNICODE -D_UNICODE"
-            }
-        },
-        {
-            "name": "x64",
-            "hidden": true,
-            "architecture": {
-                "value": "x64",
-                "strategy": "external"
-            }
-        },
-        {
-            "name": "msvc",
-            "hidden": true,
-            "vendor": {
-                "microsoft.com/VisualStudioSettings/CMake/1.0": {
-                    "intelliSenseMode": "windows-msvc-x64",
-                    "enableMicrosoftCodeAnalysis": true,
-                    "enableClangTidyCodeAnalysis": true
-                }
-            }
-        },
-        {
-            "name": "build-debug",
-            "hidden": true,
-            "inherits": [
-                "base",
-                "vcpkg",
-                "win32-unicode",
-                "x64",
-                "msvc"
-            ],
-            "generator": "Ninja",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": {
-                    "type": "STRING",
-                    "value": "Debug"
-                }
-            }
-        },
-        {
-            "name": "build-relwithdebinfo",
-            "hidden": true,
-            "inherits": [
-                "base",
-                "vcpkg",
-                "win32-unicode",
-                "x64",
-                "msvc"
-            ],
-            "generator": "Ninja",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": {
-                    "type": "STRING",
-                    "value": "RelWithDebInfo"
-                }
-            }
-        },
-        {
-            "name": "all",
-            "hidden": true,
-            "environment": {
-                "RUNTIME_DISABLE_FLAGS": "",
-                "COMMONLIBSSE_COMPILER": "/permissive- /Zc:preprocessor /EHsc $penv{CXXFLAGS} -DENABLE_COMMONLIBSSE_TESTING $env{RUNTIME_DISABLE_FLAGS}"
-            }
-        },
-        {
-            "name": "se-ae",
-            "hidden": true,
-            "environment": {
-                "RUNTIME_DISABLE_FLAGS": "-UENABLE_SKYRIM_VR",
-                "COMMONLIBSSE_COMPILER": "/permissive- /Zc:preprocessor /EHsc $penv{CXXFLAGS} -DENABLE_COMMONLIBSSE_TESTING $env{RUNTIME_DISABLE_FLAGS}"
-            }
-        },
-        {
-            "name": "vr",
-            "hidden": true,
-            "environment": {
-                "RUNTIME_DISABLE_FLAGS": "-UENABLE_SKYRIM_SE -UENABLE_SKYRIM_AE",
-                "COMMONLIBSSE_COMPILER": "/permissive- /Zc:preprocessor /EHsc $penv{CXXFLAGS} -DENABLE_COMMONLIBSSE_TESTING $env{RUNTIME_DISABLE_FLAGS}"
-            }
-        },
-        {
-            "name": "build-debug-all",
-            "inherits": [
-                "build-debug",
-                "all"
-            ],
-            "displayName": "Debug",
-            "binaryDir": "${sourceDir}/build/debug"
-        },
-        {
-            "name": "build-relwithdebinfo-all",
-            "inherits": [
-                "build-relwithdebinfo",
-                "all"
-            ],
-            "displayName": "RelWithDebInfo",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo"
-        },
-        {
-            "name": "build-debug-se-ae",
-            "inherits": [
-                "build-debug",
-                "se-ae"
-            ],
-            "displayName": "Debug (SE-AE only)",
-            "binaryDir": "${sourceDir}/build/debug-se-ae-only"
-        },
-        {
-            "name": "build-relwithdebinfo-se-ae",
-            "inherits": [
-                "build-relwithdebinfo",
-                "se-ae"
-            ],
-            "displayName": "RelWithDebInfo (SE-AE only)",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo-se-ae-only"
-        },
-        {
-            "name": "build-debug-vr",
-            "inherits": [
-                "build-debug",
-                "vr"
-            ],
-            "displayName": "Debug (VR only)",
-            "binaryDir": "${sourceDir}/build/debug-vr-only"
-        },
-        {
-            "name": "build-relwithdebinfo-vr",
-            "inherits": [
-                "build-relwithdebinfo",
-                "vr"
-            ],
-            "displayName": "RelWithDebInfo (VR only)",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo-vr-only"
-        }
-    ],
-    "buildPresets": [
-        {
-            "name": "debug-all",
-            "displayName": "Debug",
-            "configurePreset": "build-debug-all"
-        },
-        {
-            "name": "relwithdebinfo-all",
-            "displayName": "RelWithDebInfo",
-            "configurePreset": "build-relwithdebinfo-all"
-        },
-        {
-            "name": "debug-se-ae",
-            "displayName": "Debug (SE-AE only)",
-            "configurePreset": "build-debug-se-ae"
-        },
-        {
-            "name": "relwithdebinfo-se-ae",
-            "displayName": "RelWithDebInfo (SE-AE only)",
-            "configurePreset": "build-relwithdebinfo-se-ae"
-        },
-        {
-            "name": "debug-vr",
-            "displayName": "Debug (VR only)",
-            "configurePreset": "build-debug-vr"
-        },
-        {
-            "name": "relwithdebinfo-vr",
-            "displayName": "RelWithDebInfo (VR only)",
-            "configurePreset": "build-relwithdebinfo-vr"
-        }
-    ]
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "release-se-ae",
+      "displayName": "Release - Skyrim SE and AE",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../AnimationMotionRevolution-build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
+        "VCPKG_HOST_TRIPLET": "x64-windows-static-md",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
+        "ENABLE_SKYRIM_SE": "ON",
+        "ENABLE_SKYRIM_AE": "ON",
+        "ENABLE_SKYRIM_VR": "OFF",
+        "SKSE_SUPPORT_XBYAK": "ON",
+        "SKSE_SUPPORT_PATCH_SAFETY": "ON",
+        "BUILD_TESTS": "OFF",
+        "COMMONLIB_PREBUILT": "OFF",
+        "COMMONLIB_ENABLE_IPO": "OFF",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release-se-ae",
+      "configurePreset": "release-se-ae",
+      "jobs": 0
+    }
+  ]
 }

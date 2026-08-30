@@ -1,456 +1,865 @@
 #include "Hooks.h"
 
 #include "AnimMotionHandler.h"
+#include "Settings.h"
+#ifdef AMR_ENABLE_TRUEHUD_DEBUG
+#include "TrueHUDIntegration.h"
+#endif
 
 #include "utils/Logger.h"
+#include "utils/Trampoline.h"
 
-#include "RE/H/hkpCharacterMovementUtil.h"
-#include "RE/H/hkVector4.h"
-
-#include "RE/RTTI.h"
+#include "RE/B/bhkPickData.h"
+#include "RE/B/bhkCharProxyController.h"
+#include "RE/B/bhkCharRigidBodyController.h"
+#include "RE/C/CFilter.h"
+#include "RE/H/hkpCharacterProxy.h"
+#include "RE/H/hkpCharacterRigidBody.h"
+#include "RE/H/hkpConvexVerticesShape.h"
+#include "RE/H/hkpListShape.h"
+#include "RE/M/MotionDataContainer.h"
 
 namespace hooks
 {
-	// Container for each character instance that is playing an animation with custom motion data
-	class CharacterClipAnimMotionMap
+	namespace
 	{
-	public:
-		static CharacterClipAnimMotionMap* GetSingleton()
+		constexpr float kMotionTimeEpsilon = 1.0e-4F;
+		constexpr float kVectorEpsilon = 1.0e-5F;
+
+		class CharacterClipAnimMotionMap
 		{
-			static CharacterClipAnimMotionMap singleton;
-
-			return &singleton;
-		}
-
-		template <typename StringT>
-		void Add(const RE::hkbCharacter* a_hkbCharacter, const StringT& a_clipName, const AnimMotionData& a_animMotionData)
-		{
-			std::string clipName{ a_clipName.c_str() };
-
-			try {
-				data[a_hkbCharacter][clipName] = a_animMotionData;
-			} catch (const std::exception& e) {
-				logger::warn("Exception thrown: {}, clearing to avoid possible memory overflow", e.what());
-				logger::flush();
-
-				data.clear();
-			}
-		}
-
-		template <typename StringT>
-		AnimMotionData* Get(const RE::hkbCharacter* a_hkbCharacter, const StringT& a_clipName)
-		{
-			std::string clipName{ a_clipName.c_str() };
-
-			if (data.contains(a_hkbCharacter) && data[a_hkbCharacter].contains(clipName)) {
-				return &data[a_hkbCharacter][clipName];
-			} else {
-				return nullptr;
-			}
-		}
-
-		template <typename StringT>
-		void Remove(const RE::hkbCharacter* a_hkbCharacter, const StringT& a_clipName)
-		{
-			std::string clipName{ a_clipName.c_str() };
-
-			if (data.contains(a_hkbCharacter) && data[a_hkbCharacter].contains(clipName)) {
-				if (data[a_hkbCharacter].size() == 1) {
-					data.erase(a_hkbCharacter);
-				} else {
-					data[a_hkbCharacter].erase(clipName);
-				}
-			}
-		}
-
-		mutable RE::BSSpinLock lock;
-
-	private:
-		std::map<const RE::hkbCharacter*, std::map<std::string, AnimMotionData>> data;
-	};
-
-	// Called when animations are activated by clip generators
-	std::uint32_t hkbClipGenerator::ComputeStartTime_Hook(const RE::hkbClipGenerator* a_this, const RE::hkbContext* a_hkbContext)
-	{
-		auto characterClipAnimMotionMap = CharacterClipAnimMotionMap::GetSingleton();
-
-		RE::BSSpinLockGuard lockguard(characterClipAnimMotionMap->lock);
-
-		const RE::hkaAnimation* boundAnimation = GetBoundAnimation(a_this);
-
-		if (boundAnimation)
-		{
-			const RE::hkbCharacter* hkbCharacter = a_hkbContext ? a_hkbContext->character : nullptr;
-
-			if (hkbCharacter)
+		public:
+			static CharacterClipAnimMotionMap* GetSingleton()
 			{
-				AnimMotionData* animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, a_this->name);
+				static CharacterClipAnimMotionMap singleton;
+				return std::addressof(singleton);
+			}
 
-				// Animation activation is multithreaded, therefore I need to keep track of the number of times
-				// they are activated
-				if (animMotionData && animMotionData->animation == boundAnimation)
-				{
-					animMotionData->activeCount++;
-				}
-				else
-				{
-					Translation* translation = nullptr;
-					Rotation* rotation = nullptr;
-
-					for (const RE::hkaAnnotationTrack& annotationTrack : boundAnimation->annotationTracks)
-					{
-						for (const RE::hkaAnnotationTrack::Annotation& annotation : annotationTrack.annotations)
-						{
-							auto dataParsed = ParseAnnotation(annotation);
-
-							translation = std::get_if<Translation>(&dataParsed);
-
-							if (translation)
-							{
-								if (animMotionData && animMotionData->animation == boundAnimation)
-								{
-									animMotionData->Add(translation);
-								}
-								else
-								{
-									characterClipAnimMotionMap->Add(hkbCharacter, a_this->name, AnimMotionData{ boundAnimation, translation });
-
-									if (!animMotionData)
-									{
-										animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, a_this->name);
-									}
-								}
-							}
-							else
-							{
-								rotation = std::get_if<Rotation>(&dataParsed);
-
-								if (rotation)
-								{
-									if (animMotionData && animMotionData->animation == boundAnimation)
-									{
-										animMotionData->Add(rotation);
-									}
-									else
-									{
-										characterClipAnimMotionMap->Add(hkbCharacter, a_this->name, AnimMotionData{ boundAnimation, rotation });
-
-										if (!animMotionData)
-										{
-											animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, a_this->name);
-										}
-									}
-								}
-							}
-						}
-
-						if (animMotionData)
-						{
-							animMotionData->SortListsByTime();
-
-							if (!animMotionData->translationList.empty() && animMotionData->translationList.back().time != boundAnimation->duration)
-							{
-								logger::warn("Animation={} of hkbCharacter=0x{:08x} ends at {}, while custom translation ends at {}",
-									a_this->animationName.c_str(), reinterpret_cast<std::uint64_t>(hkbCharacter),
-									boundAnimation->duration, animMotionData->translationList.back().time);
-							}
-
-							if (!animMotionData->rotationList.empty() && animMotionData->rotationList.back().time != boundAnimation->duration)
-							{
-								logger::warn("Animation={} of hkbCharacter=0x{:08x} ends at {}, while custom rotation ends at {}",
-									a_this->animationName.c_str(), reinterpret_cast<std::uint64_t>(hkbCharacter),
-									boundAnimation->duration, animMotionData->rotationList.back().time);
-							}
-
-							// Support only for annotations in the same track, quit the loop when found
-							break;
-						}
-					}
+			template <typename StringT>
+			void Add(
+				const RE::hkbCharacter* a_hkbCharacter,
+				const StringT& a_clipName,
+				AnimMotionData a_animMotionData)
+			{
+				const std::string clipName{ a_clipName.c_str() };
+				try {
+					data[a_hkbCharacter][clipName] = std::move(a_animMotionData);
+				} catch (const std::exception& e) {
+					logger::warn(
+						"Exception while tracking animation motion: {}; clearing the cache",
+						e.what());
+					logger::flush();
+					data.clear();
 				}
 			}
-		}
 
-		return ComputeStartTime(a_this);
-	}
-
-	// Called when animations are deactivated by clip generators
-	void hkbClipGenerator::ResetIgnoreStartTime_Hook(const RE::hkbClipGenerator* a_this, const RE::hkbContext* a_hkbContext)
-	{
-		auto characterClipAnimMotionMap = CharacterClipAnimMotionMap::GetSingleton();
-
-		RE::BSSpinLockGuard lockguard(characterClipAnimMotionMap->lock);
-
-		const RE::hkaAnimation* boundAnimation = GetBoundAnimation(a_this);
-
-		if (boundAnimation)
-		{
-			const RE::hkbCharacter* hkbCharacter = a_hkbContext ? a_hkbContext->character : nullptr;
-
-			if (hkbCharacter)
+			template <typename StringT>
+			AnimMotionData* Get(const RE::hkbCharacter* a_hkbCharacter, const StringT& a_clipName)
 			{
-				AnimMotionData* animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, a_this->name);
-
-				// Animation deactivation is also multithreaded, so keep track of the number of
-				// activated times left
-				if (animMotionData && animMotionData->animation == boundAnimation)
-				{
-					animMotionData->activeCount--;
-
-					// Erase from the list when deactivated same times as activated
-					if (!animMotionData->activeCount)
-					{
-						characterClipAnimMotionMap->Remove(hkbCharacter, a_this->name);
-					}
+				const auto characterIt = data.find(a_hkbCharacter);
+				if (characterIt == data.end()) {
+					return nullptr;
 				}
+
+				const auto clipIt = characterIt->second.find(std::string{ a_clipName.c_str() });
+				return clipIt != characterIt->second.end() ? std::addressof(clipIt->second) : nullptr;
 			}
-		}
 
-		ResetIgnoreStartTime(a_this);
-	}
-
-	void MotionDataContainer::ProcessTranslationData_Hook(RE::MotionDataContainer* a_this, float a_motionTime,
-														  RE::NiPoint3& a_translation, const RE::BSFixedString* a_clipName,
-														  RE::Character* a_character)
-	{
-		auto characterClipAnimMotionMap = CharacterClipAnimMotionMap::GetSingleton();
-
-		RE::BSSpinLockGuard lockguard(characterClipAnimMotionMap->lock);
-
-		RE::hkbCharacter* hkbCharacter = GethkbCharacter(a_character);
-
-		AnimMotionData* animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, *a_clipName);
-
-		std::vector<Translation>* customTranslationList = animMotionData ? &animMotionData->translationList : nullptr;
-
-		bool hasCustomMotionList = customTranslationList && !customTranslationList->empty();
-
-		if (hasCustomMotionList)
-		{
-			float endMotionTime = customTranslationList->back().time;
-
-			float curMotionTime = (a_motionTime > endMotionTime) ? endMotionTime : a_motionTime;
-
-			auto segCount = static_cast<std::uint32_t>(customTranslationList->size());
-
-			for (std::uint32_t segIndex = 1; segIndex <= segCount; segIndex++)
+			template <typename StringT>
+			void Remove(const RE::hkbCharacter* a_hkbCharacter, const StringT& a_clipName)
 			{
-				float curSegMotionTime = customTranslationList->at(segIndex - 1).time;
-
-				if (curMotionTime <= curSegMotionTime)
-				{
-					std::uint32_t prevSegIndex = segIndex - 1;
-					float segProgress = 1.0f;
-
-					float prevSegMotionTime = prevSegIndex ? customTranslationList->at(prevSegIndex - 1).time : 0.0f;
-
-					float curSegMotionDuration = curSegMotionTime - prevSegMotionTime;
-					if (curSegMotionDuration > std::numeric_limits<float>::epsilon())
-					{
-						segProgress = (curMotionTime - prevSegMotionTime) / curSegMotionDuration;
-					}
-
-					const RE::NiPoint3& curSegTranslation = customTranslationList->at(segIndex - 1).delta;
-
-					const RE::NiPoint3& prevSegTranslation = prevSegIndex ?
-																   customTranslationList->at(prevSegIndex - 1).delta :
-																   RE::NiPoint3{ 0.0f, 0.0f, 0.0f };
-
-					a_translation = (curSegTranslation * segProgress + prevSegTranslation * (1.0f - segProgress));
-
-					auto charController = a_character->GetCharController();
-					auto charStateOnGround = reinterpret_cast<RE::bhkCharacterStateOnGround*>(charController->context.stateManager->registeredState[RE::hkpCharacterStateType::kOnGround]);
-
-					charStateOnGround->unk10 = a_translation.z == 0.0;
-
-
+				const auto characterIt = data.find(a_hkbCharacter);
+				if (characterIt == data.end()) {
 					return;
 				}
-			}
-		}
-		else
-		{
-			// The game checks this in the original code, so we do
-			bool hasVanillaMotionList = a_this->translationSegCount > static_cast<std::uint32_t>(a_this->IsTranslationDataAligned());
 
-			if (hasVanillaMotionList)
-			{
-				ProcessTranslationData(&a_this->translationDataPtr, a_motionTime, a_translation);
-
-				return;
-			}
-		}
-
-		a_translation = RE::NiPoint3{ 0.0f, 0.0f, 0.0f };
-	}
-
-	void MotionDataContainer::ProcessRotationData_Hook(RE::MotionDataContainer* a_this, float a_motionTime,
-													   RE::NiQuaternion& a_rotation, const RE::BSFixedString* a_clipName,
-													   RE::Character* a_character)
-	{
-		auto characterClipAnimMotionMap = CharacterClipAnimMotionMap::GetSingleton();
-		RE::BSSpinLockGuard lockguard(characterClipAnimMotionMap->lock);
-
-		RE::hkbCharacter* hkbCharacter = GethkbCharacter(a_character);
-
-		auto characterController = a_character->GetCharController();
-
-		AnimMotionData* animMotionData = characterClipAnimMotionMap->Get(hkbCharacter, *a_clipName);
-
-		std::vector<Rotation>* customRotationList = animMotionData ? &animMotionData->rotationList : nullptr;
-
-		bool hasCustomMotionList = customRotationList && !customRotationList->empty();
-
-		if (hasCustomMotionList)
-		{
-			float endMotionTime = customRotationList->back().time;
-
-			float curMotionTime = (a_motionTime > endMotionTime) ? endMotionTime : a_motionTime;
-
-			for (std::uint32_t segIndex = 1; segIndex <= customRotationList->size(); segIndex++)
-			{
-				float curSegMotionTime = customRotationList->at(segIndex - 1).time;
-
-				if (curMotionTime <= curSegMotionTime)
-				{
-					std::uint32_t prevSegIndex = segIndex - 1;
-					float segProgress = 1.0f;
-
-					float prevSegMotionTime = prevSegIndex ? customRotationList->at(prevSegIndex - 1).time : 0.0f;
-
-					float curSegMotionDuration = curSegMotionTime - prevSegMotionTime;
-					if (curSegMotionDuration > std::numeric_limits<float>::epsilon())
-					{
-						segProgress = (curMotionTime - prevSegMotionTime) / curSegMotionDuration;
-					}
-					const RE::NiQuaternion& curSegRotation = customRotationList->at(segIndex - 1).delta;
-					const RE::NiQuaternion& prevSegRotation = prevSegIndex ?
-																	customRotationList->at(prevSegIndex - 1).delta :
-																	RE::NiQuaternion{ 1.0f, 0.0f, 0.0f, 0.0f };
-
-					InterpolateRotation(a_rotation, segProgress, prevSegRotation, curSegRotation);
-
-					return;
+				characterIt->second.erase(std::string{ a_clipName.c_str() });
+				if (characterIt->second.empty()) {
+					data.erase(characterIt);
 				}
 			}
-		}
-		else
+
+			RE::BSSpinLock lock;
+
+		private:
+			std::map<const RE::hkbCharacter*, std::map<std::string, AnimMotionData>> data;
+		};
+
+		REL::Relocation<std::uint32_t (*)(const RE::hkbClipGenerator*)> g_computeStartTime;
+		REL::Relocation<void (*)(const RE::hkbClipGenerator*)> g_resetIgnoreStartTime;
+
+		REL::Relocation<void (*)(std::uintptr_t*, float, RE::NiPoint3&)> g_processTranslationData{
+			REL::RelocationID{ 31812, 32582 }
+		};
+		REL::Relocation<void (*)(std::uintptr_t*, float, RE::NiQuaternion&)> g_processRotationData{
+			REL::RelocationID{ 31813, 32583 }
+		};
+		REL::Relocation<void (*)(
+			RE::NiQuaternion&,
+			float,
+			const RE::NiQuaternion&,
+			const RE::NiQuaternion&)>
+			g_interpolateRotation{ REL::RelocationID{ 69459, 70836 } };
+
+		const RE::hkaAnimation* GetBoundAnimation(const RE::hkbClipGenerator* a_clip)
 		{
-			// The game checks this in the original code, so we do
-			bool hasVanillaMotionList = a_this->rotationSegCount > static_cast<std::uint32_t>(a_this->IsRotationDataAligned());
-
-			if (hasVanillaMotionList)
-			{
-				ProcessRotationData(&a_this->rotationDataPtr, a_motionTime, a_rotation);
-
-				return;
-			}
+			return a_clip && a_clip->binding && a_clip->binding->animation ?
+				       a_clip->binding->animation.get() :
+				       nullptr;
 		}
 
-		a_rotation = RE::NiQuaternion{ 1.0f, 0.0f, 0.0f, 0.0f };
-	}
-
-	RE::hkpCharacterStateType hkpCharacterContext::GetCharacterState_Hook(RE::hkpCharacterContext* a_this)
-	{
-		auto charStateOnGround = reinterpret_cast<RE::bhkCharacterStateOnGround*>(a_this->stateManager->registeredState[RE::hkpCharacterStateType::kOnGround]);
-
-		return charStateOnGround->unk10 ? a_this->currentState : RE::hkpCharacterStateType::kSwimming;
-	}
-
-	void SimulateStatePhysics(RE::bhkCharacterStateOnGround* a_this, RE::bhkCharacterController* a_characterController)
-	{
-		RE::Character* character = nullptr;
-		for (RE::BSTEventSink<RE::bhkCharacterMoveFinishEvent>* sink : a_characterController->sinks)
+		std::uint32_t ComputeStartTimeHook(
+			const RE::hkbClipGenerator* a_clip,
+			const RE::hkbContext* a_context)
 		{
-			character = skyrim_cast<RE::Character*>(sink);
-			if (character)
-			{
-				break;
+			auto* motionMap = CharacterClipAnimMotionMap::GetSingleton();
+			RE::BSSpinLockGuard lock{ motionMap->lock };
+
+			const auto* boundAnimation = GetBoundAnimation(a_clip);
+			const auto* hkbCharacter = a_context ? a_context->character : nullptr;
+			if (!boundAnimation || !hkbCharacter) {
+				return g_computeStartTime(a_clip);
 			}
-			else
-			{
-				character = skyrim_cast<RE::PlayerCharacter*>(sink);
-				if (character)
-				{
+
+			auto* existing = motionMap->Get(hkbCharacter, a_clip->name);
+			if (existing && existing->animation == boundAnimation) {
+				++existing->activeCount;
+				return g_computeStartTime(a_clip);
+			}
+
+			AnimMotionData parsed{ boundAnimation };
+			for (const auto& annotationTrack : boundAnimation->annotationTracks) {
+				for (const auto& annotation : annotationTrack.annotations) {
+					auto parsedAnnotation = ParseAnnotation(annotation);
+					if (const auto* translation = std::get_if<Translation>(&parsedAnnotation)) {
+						parsed.Add(*translation);
+					} else if (const auto* rotation = std::get_if<Rotation>(&parsedAnnotation)) {
+						parsed.Add(*rotation);
+					}
+				}
+
+				if (!parsed.translationList.empty() || !parsed.rotationList.empty()) {
 					break;
 				}
 			}
-		}
 
-		RE::BSAnimationGraphManagerPtr animGraphManager;
+			if (!parsed.translationList.empty() || !parsed.rotationList.empty()) {
+				parsed.SortListsByTime();
+				logger::info(
+					"[AMR-DIAG][activate] clip='{}' animation='{}' character={} duration={} tracks={} translationKeys={} rotationKeys={} translationEnd=({}, {}, {})",
+					a_clip->name.c_str(),
+					a_clip->animationName.c_str(),
+					static_cast<const void*>(hkbCharacter),
+					boundAnimation->duration,
+					boundAnimation->annotationTracks.size(),
+					parsed.translationList.size(),
+					parsed.rotationList.size(),
+					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.x,
+					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.y,
+					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.z);
 
-		if (character && character->GetAnimationGraphManager(animGraphManager))
-		{
-			std::uint32_t activeGraph = animGraphManager->GetRuntimeData().activeGraph;
+				if (!parsed.translationList.empty() &&
+					std::abs(parsed.translationList.back().time - boundAnimation->duration) >
+						kMotionTimeEpsilon) {
+					logger::warn(
+						"Animation {} ends at {}, while custom translation ends at {}",
+						a_clip->animationName.c_str(),
+						boundAnimation->duration,
+						parsed.translationList.back().time);
+				}
+				if (!parsed.rotationList.empty() &&
+					std::abs(parsed.rotationList.back().time - boundAnimation->duration) >
+						kMotionTimeEpsilon) {
+					logger::warn(
+						"Animation {} ends at {}, while custom rotation ends at {}",
+						a_clip->animationName.c_str(),
+						boundAnimation->duration,
+						parsed.rotationList.back().time);
+				}
 
-			RE::BShkbAnimationGraph* animGraph = animGraphManager->graphs[activeGraph].get();
-			RE::BSTEventSource<RE::BSAnimationGraphEvent>* animGraphEventSource = animGraph;
-
-			RE::BSAnimationGraphEvent event{};
-
-			animGraphEventSource->SendEvent(&event);
-		}
-
-		RE::bhkWorld* world = a_characterController->GetHavokWorld();
-
-		RE::hkVector4 position = a_characterController->GetPosition();
-
-		a_characterController->fallStartHeight = position.z * 69.991249;
-
-		std::uint32_t collisionFilterInfo;
-		a_characterController->GetCollisionFilterInfo(collisionFilterInfo);
-
-		RE::bhkPickData pickData;
-		pickData.rayInput.from = position;
-		pickData.rayInput.to = position - RE::hkVector4{ 0.0F, 0.0F, 0.5F, 0.0F };
-		pickData.rayInput.filterInfo = collisionFilterInfo;
-
-		world->PickObject(pickData);
-
-		if (pickData.rayOutput.rootCollidable)
-		{
-			if (pickData.rayOutput.normal.z < a_characterController->unk300)
-			{
-				a_characterController->flags.set(RE::CHARACTER_FLAGS::kSupport);
+				motionMap->Add(hkbCharacter, a_clip->name, std::move(parsed));
 			}
+
+			return g_computeStartTime(a_clip);
 		}
-		else
+
+		void ResetIgnoreStartTimeHook(
+			const RE::hkbClipGenerator* a_clip,
+			const RE::hkbContext* a_context)
 		{
-			a_characterController->wantState = RE::hkpCharacterStateType::kInAir;
-			a_characterController->flags.reset(RE::CHARACTER_FLAGS::kSupport);
+			auto* motionMap = CharacterClipAnimMotionMap::GetSingleton();
+			RE::BSSpinLockGuard lock{ motionMap->lock };
+
+			const auto* boundAnimation = GetBoundAnimation(a_clip);
+			const auto* hkbCharacter = a_context ? a_context->character : nullptr;
+			if (boundAnimation && hkbCharacter) {
+				auto* motionData = motionMap->Get(hkbCharacter, a_clip->name);
+				if (motionData && motionData->animation == boundAnimation) {
+					--motionData->activeCount;
+					if (motionData->activeCount <= 0) {
+						motionMap->Remove(hkbCharacter, a_clip->name);
+					}
+				}
+			}
+
+			g_resetIgnoreStartTime(a_clip);
 		}
 
-		RE::hkVector4 desiredVelocity = a_characterController->velocityMod;
-
-		desiredVelocity.x = a_characterController->velocityMod.y;
-		desiredVelocity.y = a_characterController->velocityMod.x;
-		
-		RE::hkpCharacterMovementUtil::hkpMovementUtilInput movementUtil;
-		movementUtil.forward = a_characterController->forwardVec;
-		movementUtil.up = RE::hkVector4{ 0.0F, 0.0F, 1.0F, 0.0F };
-		movementUtil.surfaceNormal = a_characterController->supportNorm;
-		movementUtil.currentVelocity = a_characterController->outVelocity;
-		movementUtil.desiredVelocity = desiredVelocity;
-		movementUtil.surfaceVelocity = a_characterController->surfaceInfo.surfaceVelocity;
-		movementUtil.gain = 1.0F;
-		movementUtil.maxVelocityDelta = 500.0F;
-
-		RE::hkpCharacterMovementUtil::CalculateMovement(movementUtil, a_characterController->outVelocity);
-
-		a_characterController->outVelocity += a_characterController->surfaceInfo.surfaceVelocity;
-
-		float gravity = world->GetGravity().quad.m128_f32[0];
-
-		a_characterController->outVelocity += gravity * a_characterController->stepInfo.deltaTime;
-
-		a_characterController->SetWantedState();
-
-		RE::hkpCharacterStateType stateType = a_characterController->context.currentState;
-
-		if (stateType != RE::hkpCharacterStateType::kOnGround)
+		RE::hkbCharacter* GetHkbCharacter(RE::Character* a_character)
 		{
-			auto characterState = static_cast<RE::bhkCharacterState*>(a_characterController->context.stateManager->registeredState[stateType]);
+			if (!a_character) {
+				return nullptr;
+			}
 
-			characterState->SimulateStatePhysics(a_characterController);
+			RE::BSAnimationGraphManagerPtr manager;
+			if (!a_character->GetAnimationGraphManager(manager) || !manager) {
+				return nullptr;
+			}
+
+			const auto activeGraph = manager->GetRuntimeData().activeGraph;
+			if (activeGraph >= manager->graphs.size()) {
+				return nullptr;
+			}
+
+			const auto graph = manager->graphs[activeGraph];
+			return graph ? std::addressof(graph->characterInstance) : nullptr;
 		}
+
+		bool SampleTranslation(
+			const std::vector<Translation>& a_motion,
+			float a_motionTime,
+			RE::NiPoint3& a_translation)
+		{
+			if (a_motion.empty()) {
+				return false;
+			}
+
+			const float currentTime = std::clamp(a_motionTime, 0.0F, a_motion.back().time);
+			for (std::size_t index = 0; index < a_motion.size(); ++index) {
+				const auto& current = a_motion[index];
+				if (currentTime <= current.time) {
+					const auto& previousDelta =
+						index > 0 ? a_motion[index - 1].delta : RE::NiPoint3{};
+					const float previousTime = index > 0 ? a_motion[index - 1].time : 0.0F;
+					const float duration = current.time - previousTime;
+					const float progress = duration > kMotionTimeEpsilon ?
+						                       (currentTime - previousTime) / duration :
+						                       1.0F;
+					a_translation =
+						current.delta * progress + previousDelta * (1.0F - progress);
+					return true;
+				}
+			}
+
+			a_translation = a_motion.back().delta;
+			return true;
+		}
+
+		bool SampleRotation(
+			const std::vector<Rotation>& a_motion,
+			float a_motionTime,
+			RE::NiQuaternion& a_rotation)
+		{
+			if (a_motion.empty()) {
+				return false;
+			}
+
+			const float currentTime = std::clamp(a_motionTime, 0.0F, a_motion.back().time);
+			for (std::size_t index = 0; index < a_motion.size(); ++index) {
+				const auto& current = a_motion[index];
+				if (currentTime <= current.time) {
+					const RE::NiQuaternion previous =
+						index > 0 ? a_motion[index - 1].delta :
+						            RE::NiQuaternion{ 1.0F, 0.0F, 0.0F, 0.0F };
+					const float previousTime = index > 0 ? a_motion[index - 1].time : 0.0F;
+					const float duration = current.time - previousTime;
+					const float progress = duration > kMotionTimeEpsilon ?
+						                       (currentTime - previousTime) / duration :
+						                       1.0F;
+					g_interpolateRotation(a_rotation, progress, previous, current.delta);
+					return true;
+				}
+			}
+
+			a_rotation = a_motion.back().delta;
+			return true;
+		}
+
+		RE::NiPoint3 LocalToWorld(const RE::NiPoint3& a_local, float a_yaw)
+		{
+			const float sine = std::sin(a_yaw);
+			const float cosine = std::cos(a_yaw);
+			return {
+				a_local.x * cosine + a_local.y * sine,
+				-a_local.x * sine + a_local.y * cosine,
+				a_local.z
+			};
+		}
+
+		float HorizontalLength(const RE::NiPoint3& a_vector)
+		{
+			return std::hypot(a_vector.x, a_vector.y);
+		}
+
+		bool HasVerticalMotion(const std::vector<Translation>& a_motion)
+		{
+			return std::any_of(
+				a_motion.begin(),
+				a_motion.end(),
+				[](const Translation& a_key) {
+					return std::abs(a_key.delta.z) > kVectorEpsilon;
+				});
+		}
+
+		void ResetTranslationRuntime(
+			AnimMotionData::TranslationRuntimeState& a_state,
+			RE::Character* a_character)
+		{
+			a_state = {};
+			a_state.initialized = true;
+			a_state.wasAttacking = a_character->IsAttacking();
+			a_state.previousMotionTime = -1.0F;
+			a_state.origin = a_character->GetPosition();
+			a_state.originYaw = a_character->GetAngleZ();
+
+			a_state.target = a_character->GetActorRuntimeData().currentCombatTarget;
+		}
+
+		RE::NiPoint3 WarpTranslation(
+			const RE::NiPoint3& a_translation,
+			const std::vector<Translation>& a_motion,
+			AnimMotionData::TranslationRuntimeState& a_state,
+			RE::Character* a_character,
+			bool& a_warpApplied)
+		{
+			a_warpApplied = false;
+			if (!settings::motionWarping::enabled || !a_character->IsAttacking() || a_motion.empty()) {
+				return a_translation;
+			}
+
+			auto target = a_state.target.get();
+			if (!target || target->IsDead()) {
+				a_state.target = a_character->GetActorRuntimeData().currentCombatTarget;
+				a_state.warpScale = -1.0F;
+				target = a_state.target.get();
+			}
+			if (!target || target->IsDead() ||
+				target->GetParentCell() != a_character->GetParentCell()) {
+				return a_translation;
+			}
+
+			const auto& authoredEnd = a_motion.back().delta;
+			const float authoredDistance = HorizontalLength(authoredEnd);
+			if (authoredDistance < settings::motionWarping::minimumAuthoredDistance ||
+				authoredDistance <= kVectorEpsilon) {
+				return a_translation;
+			}
+
+			if (a_state.warpScale < 0.0F) {
+				const RE::NiPoint3 targetOffset = target->GetPosition() - a_state.origin;
+				const float targetDistance = HorizontalLength(targetOffset);
+				const RE::NiPoint3 authoredWorld = LocalToWorld(authoredEnd, a_state.originYaw);
+				if (targetDistance > kVectorEpsilon) {
+					const float cosine = std::clamp(
+						(authoredWorld.x * targetOffset.x + authoredWorld.y * targetOffset.y) /
+							(authoredDistance * targetDistance),
+						-1.0F,
+						1.0F);
+					const float angle =
+						std::acos(cosine) * 180.0F / std::numbers::pi_v<float>;
+					if (angle > settings::motionWarping::maximumTargetAngleDegrees) {
+						return a_translation;
+					}
+				}
+
+				const float desiredDistance = std::clamp(
+					targetDistance - settings::motionWarping::stopDistance,
+					0.0F,
+					authoredDistance);
+				a_state.warpScale = std::clamp(
+					desiredDistance / authoredDistance,
+					0.0F,
+					1.0F);
+				logger::info(
+					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} targetDistance={} authoredDistance={} desiredDistance={} scale={}",
+					a_character->GetFormID(),
+					target->GetFormID(),
+					targetDistance,
+					authoredDistance,
+					desiredDistance,
+					a_state.warpScale);
+			}
+
+			a_warpApplied = true;
+			RE::NiPoint3 warped = a_translation;
+			warped.x *= a_state.warpScale;
+			warped.y *= a_state.warpScale;
+			return warped;
+		}
+
+		struct GroundProbeResult
+		{
+			bool hasGround{ true };
+			bool hasWorld{ false };
+			float startZ{ 0.0F };
+			float endZ{ 0.0F };
+			float hitFraction{ 1.0F };
+			float worldScale{ 0.0F };
+			std::uint32_t filterInfo{ 0 };
+			RE::NiPoint3 hitPosition{};
+		};
+
+		struct ControllerRadius
+		{
+			std::uint32_t rootShapeType{ 0 };
+			float halfExtentX{ 0.0F };
+			float halfExtentY{ 0.0F };
+			float convexMargin{ 0.0F };
+			float inverseScale{ 0.0F };
+			float world{ 0.0F };
+		};
+
+		ControllerRadius GetCharacterControllerRadius(RE::Character* a_character)
+		{
+			ControllerRadius result{};
+			if (const auto* controller = a_character->GetCharController()) {
+				const RE::hkpShape* shape = nullptr;
+				if (const auto* proxyController =
+						skyrim_cast<const RE::bhkCharProxyController*>(controller)) {
+					if (const auto* proxy = proxyController->GetCharacterProxy();
+						proxy && proxy->shapePhantom) {
+						shape = proxy->shapePhantom->collidable.shape;
+					}
+				} else if (const auto* rigidController =
+						skyrim_cast<const RE::bhkCharRigidBodyController*>(controller)) {
+					const auto* characterRigidBody = static_cast<const RE::hkpCharacterRigidBody*>(
+						rigidController->charRigidBody.referencedObject.get());
+					if (characterRigidBody && characterRigidBody->character) {
+						shape = characterRigidBody->character->collidable.shape;
+					}
+				}
+
+				if (!shape) {
+					return result;
+				}
+				result.rootShapeType = static_cast<std::uint32_t>(shape->type);
+
+				if (const auto* list = skyrim_cast<const RE::hkpListShape*>(shape);
+					list && !list->childInfo.empty()) {
+					shape = list->childInfo.front().shape;
+				}
+
+				if (const auto* convex =
+						skyrim_cast<const RE::hkpConvexVerticesShape*>(shape)) {
+					result.halfExtentX = std::abs(convex->aabbHalfExtents.quad.m128_f32[0]);
+					result.halfExtentY = std::abs(convex->aabbHalfExtents.quad.m128_f32[1]);
+					result.convexMargin = convex->radius;
+					result.inverseScale = RE::bhkWorld::GetWorldScaleInverse();
+					result.world =
+						std::max(result.halfExtentX, result.halfExtentY) * result.inverseScale;
+					if (std::isfinite(result.world) && result.world > kVectorEpsilon) {
+						return result;
+					}
+				}
+			}
+			return {};
+		}
+
+		GroundProbeResult ProbeGroundAt(
+			RE::Character* a_character,
+			const RE::NiPoint3& a_position)
+		{
+			GroundProbeResult result{};
+			const auto* cell = a_character->GetParentCell();
+			auto* world = cell ? cell->GetbhkWorld() : nullptr;
+			if (!world) {
+				return result;
+			}
+			result.hasWorld = true;
+
+			// Skyrim positions are converted to Havok space with GetWorldScale().
+			// GetWorldScaleInverse() converts in the opposite direction and places
+			// the ray thousands of Havok units away from the destination.
+			const float scale = RE::bhkWorld::GetWorldScale();
+			const float startZ = a_position.z + settings::rayCast::startHeight;
+			const float endZ = startZ - settings::rayCast::downwardLength;
+			result.startZ = startZ;
+			result.endZ = endZ;
+			result.worldScale = scale;
+
+			RE::bhkPickData pick{};
+			pick.rayInput.from = RE::hkVector4{
+				a_position.x * scale,
+				a_position.y * scale,
+				startZ * scale,
+				0.0F
+			};
+			pick.rayInput.to = RE::hkVector4{
+				a_position.x * scale,
+				a_position.y * scale,
+				endZ * scale,
+				0.0F
+			};
+			RE::CFilter actorFilter{};
+			a_character->GetCollisionFilterInfo(actorFilter);
+			const auto collisionGroup = static_cast<std::uint16_t>(actorFilter.filter >> 16);
+			pick.rayInput.filterInfo.filter =
+				(static_cast<std::uint32_t>(collisionGroup) << 16) |
+				static_cast<std::uint32_t>(RE::COL_LAYER::kCharController);
+			result.filterInfo = pick.rayInput.filterInfo.filter;
+
+			world->PickObject(pick);
+			result.hasGround = pick.rayOutput.HasHit();
+			result.hitFraction = pick.rayOutput.hitFraction;
+			if (result.hasGround) {
+				result.hitPosition = {
+					a_position.x,
+					a_position.y,
+					startZ + (endZ - startZ) * result.hitFraction
+				};
+			}
+			return result;
+		}
+
+		void ApplyTranslationModifiers(
+			AnimMotionData& a_motionData,
+			float a_motionTime,
+			RE::Character* a_character,
+			RE::NiPoint3& a_translation,
+			std::string_view a_clipName)
+		{
+			auto& state = a_motionData.translationRuntime;
+			const bool hasVerticalMotion = HasVerticalMotion(a_motionData.translationList);
+			const bool resetRuntime = !state.initialized ||
+				a_motionTime + kMotionTimeEpsilon < state.previousMotionTime;
+			if (resetRuntime) {
+				ResetTranslationRuntime(state, a_character);
+				const auto& authoredEnd = a_motionData.translationList.back().delta;
+				logger::info(
+					"[AMR-DIAG][motion-start] actor=0x{:08X} clip='{}' time={} keys={} authoredEnd=({}, {}, {}) position=({}, {}, {}) verticalMotion={} rayCast={} warping={} attacking={}",
+					a_character->GetFormID(),
+					a_clipName,
+					a_motionTime,
+					a_motionData.translationList.size(),
+					authoredEnd.x,
+					authoredEnd.y,
+					authoredEnd.z,
+					a_character->GetPositionX(),
+					a_character->GetPositionY(),
+					a_character->GetPositionZ(),
+					hasVerticalMotion,
+					settings::rayCast::enabled,
+					settings::motionWarping::enabled,
+					a_character->IsAttacking());
+			}
+
+			if (state.previousMotionTime >= 0.0F &&
+				std::abs(a_motionTime - state.previousMotionTime) <= kMotionTimeEpsilon) {
+				a_translation = state.lastOutput;
+				return;
+			}
+
+			const bool isAttacking = a_character->IsAttacking();
+			const bool attackStateChanged = isAttacking != state.wasAttacking;
+			if (attackStateChanged && isAttacking) {
+				state.target = a_character->GetActorRuntimeData().currentCombatTarget;
+				state.warpScale = -1.0F;
+			}
+
+			bool warpApplied = false;
+			const RE::NiPoint3 warped = WarpTranslation(
+				a_translation,
+				a_motionData.translationList,
+				state,
+				a_character,
+				warpApplied);
+#ifdef AMR_ENABLE_TRUEHUD_DEBUG
+			if (warpApplied) {
+				const auto& authoredEnd = a_motionData.translationList.back().delta;
+				RE::NiPoint3 warpedEnd = authoredEnd;
+				warpedEnd.x *= state.warpScale;
+				warpedEnd.y *= state.warpScale;
+				const auto target = state.target.get();
+				if (target) {
+					truehud::DrawMotionWarp(
+						state.origin,
+						state.origin + LocalToWorld(authoredEnd, state.originYaw),
+						state.origin + LocalToWorld(warpedEnd, state.originYaw),
+						target->GetPosition());
+				}
+			}
+#endif
+			if (state.previousMotionTime >= 0.0F && warpApplied != state.wasWarping) {
+				logger::info(
+					"[AMR-DIAG][warp] clip='{}' state={} attacking={} time={}",
+					a_clipName,
+					warpApplied ? "applied" : "inactive",
+					isAttacking,
+					a_motionTime);
+			}
+			if (state.previousMotionTime >= 0.0F && warpApplied != state.wasWarping) {
+				// Rebase only when warping actually starts or stops. An attack-state,
+				// target, or angle-gate change can disable it mid-clip; subsequent frame
+				// deltas then continue from the current output instead of snapping.
+				state.blockedOffset.x = warped.x - state.lastOutput.x;
+				state.blockedOffset.y = warped.y - state.lastOutput.y;
+			}
+			state.wasAttacking = isAttacking;
+			state.wasWarping = warpApplied;
+			RE::NiPoint3 output = warped - state.blockedOffset;
+			const RE::NiPoint3 localDelta = output - state.lastOutput;
+			const RE::NiPoint3 intendedLocalDelta = warped - state.lastWarped;
+
+			if (settings::rayCast::enabled && isAttacking && !hasVerticalMotion &&
+				HorizontalLength(localDelta) >= settings::rayCast::minimumHorizontalDelta) {
+				const RE::NiPoint3 worldDelta =
+					LocalToWorld(localDelta, a_character->GetAngleZ());
+				const RE::NiPoint3 predictedCenter = a_character->GetPosition() + worldDelta;
+				RE::NiPoint3 boundaryDirection =
+					LocalToWorld(intendedLocalDelta, a_character->GetAngleZ());
+				float boundaryDirectionLength = HorizontalLength(boundaryDirection);
+				if (boundaryDirectionLength <= kVectorEpsilon) {
+					boundaryDirection = worldDelta;
+					boundaryDirectionLength = HorizontalLength(boundaryDirection);
+				}
+				const auto controllerRadius = GetCharacterControllerRadius(a_character);
+				RE::NiPoint3 probePosition = predictedCenter;
+				if (boundaryDirectionLength > kVectorEpsilon && controllerRadius.world > 0.0F) {
+					probePosition.x += boundaryDirection.x / boundaryDirectionLength * controllerRadius.world;
+					probePosition.y += boundaryDirection.y / boundaryDirectionLength * controllerRadius.world;
+				}
+
+				const auto probe = ProbeGroundAt(a_character, probePosition);
+#ifdef AMR_ENABLE_TRUEHUD_DEBUG
+				if (settings::rayCast::debugDraw) {
+					const RE::NiPoint3 rayStart{
+						probePosition.x, probePosition.y, probe.startZ };
+					const RE::NiPoint3 rayEnd{
+						probePosition.x, probePosition.y, probe.endZ };
+					truehud::DrawGroundProbe(
+						predictedCenter,
+						probePosition,
+						rayStart,
+						rayEnd,
+						probe.hasGround ? std::addressof(probe.hitPosition) : nullptr);
+				}
+#endif
+				const bool groundBlocked = !probe.hasGround;
+				if (!state.groundProbeInitialized ||
+					groundBlocked != state.wasGroundBlocked) {
+					logger::info(
+						"[AMR-DIAG][ground] clip='{}' state={} center=({}, {}, {}) boundary=({}, {}, {}) rootShapeType={} convexHalfExtents=({}, {}) convexMargin={} inverseScale={} controllerRadiusWorld={} rayZ=({}, {}) hitFraction={} scale={} filter=0x{:08X} world={}",
+						a_clipName,
+						groundBlocked ? "blocked" : "clear",
+						predictedCenter.x,
+						predictedCenter.y,
+						predictedCenter.z,
+						probePosition.x,
+						probePosition.y,
+						probePosition.z,
+						controllerRadius.rootShapeType,
+						controllerRadius.halfExtentX,
+						controllerRadius.halfExtentY,
+						controllerRadius.convexMargin,
+						controllerRadius.inverseScale,
+						controllerRadius.world,
+						probe.startZ,
+						probe.endZ,
+						probe.hitFraction,
+						probe.worldScale,
+						probe.filterInfo,
+						probe.hasWorld);
+				}
+				state.groundProbeInitialized = true;
+				state.wasGroundBlocked = groundBlocked;
+
+				if (groundBlocked) {
+					state.blockedOffset.x += localDelta.x;
+					state.blockedOffset.y += localDelta.y;
+					output.x = state.lastOutput.x;
+					output.y = state.lastOutput.y;
+				}
+			}
+
+			state.previousMotionTime = a_motionTime;
+			state.lastWarped = warped;
+			state.lastOutput = output;
+			a_translation = output;
+		}
+
+		void ProcessTranslationDataHook(
+			RE::MotionDataContainer* a_container,
+			float a_motionTime,
+			RE::NiPoint3& a_translation,
+			const RE::BSFixedString* a_clipName,
+			RE::Character* a_character)
+		{
+			auto* motionMap = CharacterClipAnimMotionMap::GetSingleton();
+			RE::BSSpinLockGuard lock{ motionMap->lock };
+
+			auto* hkbCharacter = GetHkbCharacter(a_character);
+			auto* motionData =
+				hkbCharacter && a_clipName ? motionMap->Get(hkbCharacter, *a_clipName) : nullptr;
+
+			if (motionData &&
+				SampleTranslation(motionData->translationList, a_motionTime, a_translation)) {
+				ApplyTranslationModifiers(
+					*motionData,
+					a_motionTime,
+					a_character,
+					a_translation,
+					a_clipName->c_str());
+				return;
+			}
+
+			const bool hasVanillaMotion =
+				a_container->translationSegCount >
+				static_cast<std::uint32_t>(a_container->IsTranslationDataAligned());
+			if (hasVanillaMotion) {
+				g_processTranslationData(
+					std::addressof(a_container->translationDataPtr),
+					a_motionTime,
+					a_translation);
+				return;
+			}
+
+			a_translation = {};
+		}
+
+		void ProcessRotationDataHook(
+			RE::MotionDataContainer* a_container,
+			float a_motionTime,
+			RE::NiQuaternion& a_rotation,
+			const RE::BSFixedString* a_clipName,
+			RE::Character* a_character)
+		{
+			auto* motionMap = CharacterClipAnimMotionMap::GetSingleton();
+			RE::BSSpinLockGuard lock{ motionMap->lock };
+
+			auto* hkbCharacter = GetHkbCharacter(a_character);
+			auto* motionData =
+				hkbCharacter && a_clipName ? motionMap->Get(hkbCharacter, *a_clipName) : nullptr;
+
+			if (motionData && SampleRotation(motionData->rotationList, a_motionTime, a_rotation)) {
+				return;
+			}
+
+			const bool hasVanillaMotion =
+				a_container->rotationSegCount >
+				static_cast<std::uint32_t>(a_container->IsRotationDataAligned());
+			if (hasVanillaMotion) {
+				g_processRotationData(
+					std::addressof(a_container->rotationDataPtr),
+					a_motionTime,
+					a_rotation);
+				return;
+			}
+
+			a_rotation = RE::NiQuaternion{ 1.0F, 0.0F, 0.0F, 0.0F };
+		}
+
+	}
+
+	void Install()
+	{
+		{
+			REL::Relocation<std::uintptr_t> activate{
+				REL::RelocationID{ 58602, 59252 }
+			};
+			const std::uintptr_t hookedAddress = activate.address() + 0x66E;
+
+			struct Hook : Xbyak::CodeGenerator
+			{
+				explicit Hook(std::uintptr_t a_returnAddress)
+				{
+					Xbyak::Label hookLabel;
+					Xbyak::Label returnLabel;
+					mov(rdx, r15);
+					call(ptr[rip + hookLabel]);
+					jmp(ptr[rip + returnLabel]);
+					L(hookLabel), dq(reinterpret_cast<std::uintptr_t>(ComputeStartTimeHook));
+					L(returnLabel), dq(a_returnAddress);
+				}
+			};
+
+			g_computeStartTime =
+				utils::WriteBranchTrampoline<5>(hookedAddress, Hook{ hookedAddress + 5 });
+		}
+
+		{
+			REL::Relocation<std::uintptr_t> deactivate{
+				REL::RelocationID{ 58604, 59254 }
+			};
+			const std::uintptr_t hookedAddress = deactivate.address() + 0x1A;
+
+			struct Hook : Xbyak::CodeGenerator
+			{
+				explicit Hook(std::uintptr_t a_returnAddress)
+				{
+					Xbyak::Label hookLabel;
+					Xbyak::Label returnLabel;
+					mov(rdx, r14);
+					call(ptr[rip + hookLabel]);
+					jmp(ptr[rip + returnLabel]);
+					L(hookLabel), dq(reinterpret_cast<std::uintptr_t>(ResetIgnoreStartTimeHook));
+					L(returnLabel), dq(a_returnAddress);
+				}
+			};
+
+			g_resetIgnoreStartTime =
+				utils::WriteBranchTrampoline<5>(hookedAddress, Hook{ hookedAddress + 5 });
+		}
+
+		{
+			REL::Relocation<std::uintptr_t> processMotionData{
+				REL::RelocationID{ 31949, 32703 }
+			};
+			const auto base = processMotionData.address();
+			const auto translation1 = base + (REL::Module::IsAE() ? 0x298 : 0x28D);
+			const auto translation2 = base + (REL::Module::IsAE() ? 0x2AA : 0x2A1);
+			const auto rotation1 = base + (REL::Module::IsAE() ? 0x35C : 0x355);
+			const auto rotation2 = base + (REL::Module::IsAE() ? 0x36D : 0x368);
+			logger::info(
+				"[AMR-DIAG][hooks] processMotionData=0x{:X} translation=(0x{:X}, 0x{:X}) rotation=(0x{:X}, 0x{:X}) runtime={}",
+				base,
+				translation1,
+				translation2,
+				rotation1,
+				rotation2,
+				REL::Module::IsAE() ? "AE" : "SE");
+
+			struct Hook : Xbyak::CodeGenerator
+			{
+				explicit Hook(void* a_function)
+				{
+					Xbyak::Label hookLabel;
+					sub(rsp, 0x28);
+					mov(ptr[rsp + 0x20], r13);
+					mov(r9, rbx);
+					if (REL::Module::IsAE()) {
+						sub(r9, 0x14);
+					}
+					call(ptr[rip + hookLabel]);
+					add(rsp, 0x28);
+					ret();
+					L(hookLabel), dq(reinterpret_cast<std::uintptr_t>(a_function));
+				}
+			};
+
+			utils::WriteCallTrampoline<5>(
+				translation1,
+				Hook{ reinterpret_cast<void*>(ProcessTranslationDataHook) });
+			utils::WriteCallTrampoline<5>(
+				translation2,
+				Hook{ reinterpret_cast<void*>(ProcessTranslationDataHook) });
+			utils::WriteCallTrampoline<5>(
+				rotation1,
+				Hook{ reinterpret_cast<void*>(ProcessRotationDataHook) });
+			utils::WriteCallTrampoline<5>(
+				rotation2,
+				Hook{ reinterpret_cast<void*>(ProcessRotationDataHook) });
+		}
+
+		logger::info("Installed Animation Motion Revolution hooks");
 	}
 }

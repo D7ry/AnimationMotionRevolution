@@ -1,16 +1,18 @@
 {
-    "name": "animationmotionrevolution",
-    "version-string": "1.5.3",
-    "description": "",
-    "homepage": "https://github.com/alexsylex/AnimationMotionRevolution",
-    "license": "MIT",
-    "dependencies": [
-        "boost-atomic",
-        "boost-stl-interfaces",
-        "rsm-binary-io",
-        "span-lite",
-        "xbyak",
-        "tsl-ordered-map",
-        "commonlibsse-ng"
-    ]
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "animation-motion-revolution",
+  "version-string": "2.0.0",
+  "description": "Animation-driven root motion with ground limiting and combat-target motion warping.",
+  "homepage": "https://github.com/alexsylex/AnimationMotionRevolution",
+  "license": "MIT",
+  "builtin-baseline": "ee12231b20c95013c6638d845d04c91559a1d1ff",
+  "dependencies": [
+    "directxmath",
+    "directxtk",
+    "fmt",
+    "rapidcsv",
+    "simpleini",
+    "spdlog",
+    "xbyak"
+  ]
 }

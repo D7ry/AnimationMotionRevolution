@@ -1,156 +1,93 @@
 cmake_minimum_required(VERSION 3.21)
 
-########################################################################################################################
-## Define project
-########################################################################################################################
+# CommonLibSSE-NG and the selected vcpkg triplet use the dynamic MSVC runtime.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "")
+
+set(SKSE_SUPPORT_XBYAK ON CACHE BOOL "Enable Xbyak trampoline support" FORCE)
+set(SKSE_SUPPORT_PATCH_SAFETY ON CACHE BOOL "Validate trampoline patch boundaries" FORCE)
+set(ENABLE_SKYRIM_SE ON CACHE BOOL "Build for Skyrim SE" FORCE)
+set(ENABLE_SKYRIM_AE ON CACHE BOOL "Build for Skyrim AE" FORCE)
+set(ENABLE_SKYRIM_VR OFF CACHE BOOL "Build for Skyrim VR" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "Build CommonLibSSE tests" FORCE)
+option(AMR_ENABLE_TRUEHUD_DEBUG "Build TrueHUD debug visualizations" ON)
 
 project(
 	AnimationMotionRevolution
-	VERSION 1.5.3
+	VERSION 2.0.0
 	LANGUAGES CXX
 )
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
+set(COMMONLIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibSSE-NG")
+if(NOT EXISTS "${COMMONLIB_PATH}/include/RE/Skyrim.h")
+	message(FATAL_ERROR "CommonLibSSE-NG is missing. Run: git submodule update --init --recursive")
+endif()
 
-configure_file(
-	${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in
-	${CMAKE_CURRENT_BINARY_DIR}/version.rc
-	@ONLY
-)
+find_path(SIMPLEINI_INCLUDE_DIRS "SimpleIni.h" REQUIRED)
+find_path(XBYAK_INCLUDE_DIRS "xbyak/xbyak.h" REQUIRED)
+
+add_subdirectory("${COMMONLIB_PATH}" CommonLibSSE EXCLUDE_FROM_ALL)
+include("${COMMONLIB_PATH}/cmake/CommonLibSSE.cmake")
 
 set(headers
-	include/RE/B/bhkCharacterController.h
-	include/RE/B/bhkCharacterMoveInfo.h
-	include/RE/B/bhkCharacterState.h
-	include/RE/B/bhkCharacterStateClimbing.h
-	include/RE/B/bhkCharacterStateFlying.h
-	include/RE/B/bhkCharacterStateInAir.h
-	include/RE/B/bhkCharacterStateJumping.h
-	include/RE/B/bhkCharacterStateOnGround.h
-	include/RE/B/bhkCharacterStateSwimming.h
-	include/RE/B/bhkWorld.h
-	include/RE/H/hkaAnimatedReferenceFrame.h
-	include/RE/H/hkaAnimation.h
-	include/RE/H/hkaAnimationBinding.h
-	include/RE/H/hkaAnimationControl.h
-	include/RE/H/hkaAnnotationTrack.h
-	include/RE/H/hkaDefaultAnimationControl.h
-	include/RE/H/hkaSplineCompressedAnimation.h
-	include/RE/H/hkbBehaviorGraph.h
-	include/RE/H/hkbContext.h
-	include/RE/H/hkbClipGenerator.h
-	include/RE/H/hkbGenerator.h
-	include/RE/H/hkbNode.h
-	include/RE/H/hkbStateMachine.h
-	include/RE/H/hkClass.h
-	include/RE/H/hkpCharacterMovementUtil.h
-	include/RE/H/hkQsTransform.h
-	include/RE/H/hkVector4.h
-	include/RE/M/MotionDataContainer.h
-	include/RE/RTTI.h
-	include/utils/Trampoline.h
-	include/utils/INISettingCollection.h
-	include/utils/half.h
-	include/utils/Logger.h
-	include/utils/Setting.h
 	include/AnimMotionHandler.h
 	include/Hooks.h
 	include/Motion.h
 	include/pch.h
 	include/Settings.h
+	include/utils/Logger.h
+	include/utils/Trampoline.h
 )
 
 set(sources
-	source/utils/INISettingCollection.cpp
 	source/Hooks.cpp
 	source/main.cpp
 	source/pch.cpp
 	source/Settings.cpp
 )
 
-source_group(
-	TREE
-		${CMAKE_CURRENT_SOURCE_DIR}
-	FILES
-		${headers}
-		${sources}
+if(AMR_ENABLE_TRUEHUD_DEBUG)
+	list(APPEND headers
+		include/TrueHUDAPI.h
+		include/TrueHUDIntegration.h
+	)
+	list(APPEND sources source/TrueHUDIntegration.cpp)
+endif()
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${headers} ${sources})
+
+add_commonlibsse_plugin(
+	${PROJECT_NAME}
+	NAME "AnimationMotionRevolution"
+	AUTHOR "alexsylex"
+	USE_ADDRESS_LIBRARY
+	SOURCES ${headers} ${sources}
 )
 
-########################################################################################################################
-## Configure target DLL
-########################################################################################################################
-
-find_package(CommonLibSSE CONFIG REQUIRED)
-find_package(binary_io REQUIRED CONFIG)
-find_package(spdlog REQUIRED CONFIG)
-
-add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources})
-add_library("${PROJECT_NAME}::${PROJECT_NAME}" ALIAS "${PROJECT_NAME}")
-
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
+target_compile_definitions(
+	${PROJECT_NAME}
+	PRIVATE
+		_UNICODE
+		UNICODE
+		NOMINMAX
+		$<$<BOOL:${AMR_ENABLE_TRUEHUD_DEBUG}>:AMR_ENABLE_TRUEHUD_DEBUG>
+)
 target_include_directories(
 	${PROJECT_NAME}
 	PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/include
+		"${CMAKE_CURRENT_SOURCE_DIR}/include"
+		"${SIMPLEINI_INCLUDE_DIRS}"
+		"${XBYAK_INCLUDE_DIRS}"
 )
 
-target_link_libraries(
-	${PROJECT_NAME}
-	PRIVATE
-		CommonLibSSE::CommonLibSSE
-		spdlog::spdlog_header_only
-)
+target_precompile_headers(${PROJECT_NAME} PRIVATE include/pch.h)
 
-if (MSVC)
+if(MSVC)
+	target_compile_options(${PROJECT_NAME} PRIVATE /EHsc /MP /W4 /utf-8 /permissive- /Zc:preprocessor)
 	target_link_options(
 		${PROJECT_NAME}
 		PRIVATE
-			"$<$<CONFIG:DEBUG>:/INCREMENTAL;/OPT:NOREF;/OPT:NOICF>"
-			"$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF>"
-	)
-endif()
-
-target_precompile_headers(
-	${PROJECT_NAME}
-	PRIVATE
-		include/PCH.h
-)
-
-########################################################################################################################
-## Automatic plugin deployment
-########################################################################################################################
-
-set(SKYRIM_SE_DIR "C:/Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition")
-set(SKYRIM_VR_DIR "C:/Program Files (x86)/Steam/steamapps/common/Skyrim VR")
-set(SKYRIM_AE_1_6_353_DIR "C:/Program Files (x86)/Steam/steamapps/common/Skyrim Anniversary Edition 1.6.353")
-set(SKYRIM_AE_1_6_640_DIR "C:/Program Files (x86)/Steam/steamapps/common/Skyrim Anniversary Edition 1.6.640")
-
-if ("$ENV{RUNTIME_DISABLE_FLAGS}" STREQUAL "")
-	set(COPY_SE_AE YES)
-	set(COPY_VR YES)
-elseif ("$ENV{RUNTIME_DISABLE_FLAGS}" STREQUAL "-UENABLE_SKYRIM_VR")
-	set(COPY_SE_AE YES)
-	set(COPY_VR NO)
-elseif ("$ENV{RUNTIME_DISABLE_FLAGS}" STREQUAL "-UENABLE_SKYRIM_SE -UENABLE_SKYRIM_AE")
-	set(COPY_SE_AE NO)
-	set(COPY_VR YES)
-endif()
-
-if (COPY_SE_AE)
-	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}>
-		"${SKYRIM_SE_DIR}/Data/SKSE/Plugins/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
-		COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}>
-		"${SKYRIM_AE_1_6_353_DIR}/Data/SKSE/Plugins/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
-		COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}>
-		"${SKYRIM_AE_1_6_640_DIR}/Data/SKSE/Plugins/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
-	)
-endif()
-if (COPY_VR)
-	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}>
-		"${SKYRIM_VR_DIR}/Data/SKSE/Plugins/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
+			"$<$<CONFIG:Debug>:/INCREMENTAL;/OPT:NOREF;/OPT:NOICF>"
+			"$<$<CONFIG:Release>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF>"
 	)
 endif()
