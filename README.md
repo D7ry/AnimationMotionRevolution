@@ -37,7 +37,10 @@ gate limits scaling to animations already directed roughly toward the target.
 
 Configure with the single CMake option `AMR_ENABLE_TRUEHUD_DEBUG`, enabled by
 default. When disabled, the TrueHUD API and integration sources are omitted from
-the plugin target and all initialization and draw calls are compiled out.
+the plugin target and all initialization, input, and draw calls are compiled out.
+When enabled, both debug views start hidden. Page Up toggles motion-warp
+visualization, while Page Down independently toggles ledge-prevention
+visualization. Neither hotkey changes gameplay behavior.
 
 Settings live in
 Data/SKSE/Plugins/AnimationMotionRevolution.ini.

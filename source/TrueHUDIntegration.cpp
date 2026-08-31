@@ -8,6 +8,8 @@ namespace truehud
 	namespace
 	{
 		std::atomic<TRUEHUD_API::IVTrueHUD3*> api{ nullptr };
+		std::atomic_bool motionWarpVisible{ false };
+		std::atomic_bool ledgeProtectionVisible{ false };
 
 		constexpr float kDuration = 0.15F;
 		constexpr float kThickness = 3.0F;
@@ -23,10 +25,24 @@ namespace truehud
 			TRUEHUD_API::RequestPluginAPI(TRUEHUD_API::InterfaceVersion::V3));
 		api.store(acquired, std::memory_order_release);
 		if (acquired) {
-			logger::info("[AMR-DIAG][TrueHUD] API V3 acquired; debug visualization active");
+			logger::info("[AMR-DIAG][TrueHUD] API V3 acquired; Page Up toggles motion-warp debug, Page Down toggles ledge debug");
 		} else {
 			logger::warn("[AMR-DIAG][TrueHUD] API V3 unavailable; debug visualization disabled");
 		}
+	}
+
+	bool ToggleMotionWarpVisibility()
+	{
+		const bool visible = !motionWarpVisible.load(std::memory_order_relaxed);
+		motionWarpVisible.store(visible, std::memory_order_relaxed);
+		return visible;
+	}
+
+	bool ToggleLedgeProtectionVisibility()
+	{
+		const bool visible = !ledgeProtectionVisible.load(std::memory_order_relaxed);
+		ledgeProtectionVisible.store(visible, std::memory_order_relaxed);
+		return visible;
 	}
 
 	void DrawMotionWarp(
@@ -36,7 +52,7 @@ namespace truehud
 		const RE::NiPoint3& a_targetPosition)
 	{
 		auto* hud = api.load(std::memory_order_acquire);
-		if (!hud) {
+		if (!hud || !motionWarpVisible.load(std::memory_order_relaxed)) {
 			return;
 		}
 
@@ -57,7 +73,7 @@ namespace truehud
 		const RE::NiPoint3* a_hitPosition)
 	{
 		auto* hud = api.load(std::memory_order_acquire);
-		if (!hud) {
+		if (!hud || !ledgeProtectionVisible.load(std::memory_order_relaxed)) {
 			return;
 		}
 

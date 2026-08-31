@@ -3,6 +3,8 @@
 namespace truehud
 {
 	void Initialize();
+	bool ToggleMotionWarpVisibility();
+	bool ToggleLedgeProtectionVisibility();
 
 	void DrawMotionWarp(
 		const RE::NiPoint3& a_origin,
