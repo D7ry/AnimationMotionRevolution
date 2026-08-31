@@ -33,6 +33,20 @@ Starting or ending the attack state mid-clip rebases the cumulative
 path so enabling or disabling warping does not cause a position snap. An angle
 gate limits scaling to animations already directed roughly toward the target.
 
+Animations can override the attack-only default with timestamped annotations:
+
+```text
+animwarp <lowerScale> <upperScale> [maximumDistance]
+```
+
+The most recent `animwarp` at or before the current animation time controls the
+allowed horizontal scale and enables warping even while the actor is not
+attacking. Later annotations replace earlier ones. Before the first annotation,
+or when none exist, AMR remains attack-only with implicit limits `0 1`.
+The optional third value is a maximum current horizontal actor-to-target
+distance. Beyond it, that annotated rule is inactive and authored motion plays
+unchanged. Omitting it means there is no distance cap.
+
 ### TrueHUD debug visualization
 
 Configure with the single CMake option `AMR_ENABLE_TRUEHUD_DEBUG`, enabled by

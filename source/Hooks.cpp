@@ -131,6 +131,14 @@ namespace hooks
 			for (const auto& annotationTrack : boundAnimation->annotationTracks) {
 				for (const auto& annotation : annotationTrack.annotations) {
 					auto parsedAnnotation = ParseAnnotation(annotation);
+					if (const auto* warp = std::get_if<Warp>(&parsedAnnotation)) {
+						parsed.Add(*warp);
+					}
+				}
+			}
+			for (const auto& annotationTrack : boundAnimation->annotationTracks) {
+				for (const auto& annotation : annotationTrack.annotations) {
+					auto parsedAnnotation = ParseAnnotation(annotation);
 					if (const auto* translation = std::get_if<Translation>(&parsedAnnotation)) {
 						parsed.Add(*translation);
 					} else if (const auto* rotation = std::get_if<Rotation>(&parsedAnnotation)) {
@@ -146,7 +154,7 @@ namespace hooks
 			if (!parsed.translationList.empty() || !parsed.rotationList.empty()) {
 				parsed.SortListsByTime();
 				logger::info(
-					"[AMR-DIAG][activate] clip='{}' animation='{}' character={} duration={} tracks={} translationKeys={} rotationKeys={} translationEnd=({}, {}, {})",
+					"[AMR-DIAG][activate] clip='{}' animation='{}' character={} duration={} tracks={} translationKeys={} rotationKeys={} warpKeys={} translationEnd=({}, {}, {})",
 					a_clip->name.c_str(),
 					a_clip->animationName.c_str(),
 					static_cast<const void*>(hkbCharacter),
@@ -154,6 +162,7 @@ namespace hooks
 					boundAnimation->annotationTracks.size(),
 					parsed.translationList.size(),
 					parsed.rotationList.size(),
+					parsed.warpList.size(),
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.x,
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.y,
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.z);
@@ -311,6 +320,27 @@ namespace hooks
 				});
 		}
 
+		struct ActiveWarpRule
+		{
+			const WarpLimits* limits{ nullptr };
+			std::size_t index{ std::numeric_limits<std::size_t>::max() };
+		};
+
+		ActiveWarpRule GetActiveWarpRule(
+			const std::vector<Warp>& a_warp,
+			float a_motionTime)
+		{
+			ActiveWarpRule result{};
+			for (std::size_t index = 0; index < a_warp.size(); ++index) {
+				if (a_warp[index].time > a_motionTime + kMotionTimeEpsilon) {
+					break;
+				}
+				result.limits = std::addressof(a_warp[index].delta);
+				result.index = index;
+			}
+			return result;
+		}
+
 		void ResetTranslationRuntime(
 			AnimMotionData::TranslationRuntimeState& a_state,
 			RE::Character* a_character)
@@ -327,15 +357,30 @@ namespace hooks
 
 		RE::NiPoint3 WarpTranslation(
 			const RE::NiPoint3& a_translation,
-			const std::vector<Translation>& a_motion,
+			const AnimMotionData& a_motionData,
+			float a_motionTime,
 			AnimMotionData::TranslationRuntimeState& a_state,
 			RE::Character* a_character,
-			bool& a_warpApplied)
+			bool& a_warpApplied,
+			bool& a_warpRuleChanged)
 		{
 			a_warpApplied = false;
-			if (!settings::motionWarping::enabled || !a_character->IsAttacking() || a_motion.empty()) {
+			a_warpRuleChanged = false;
+			const auto activeRule = GetActiveWarpRule(a_motionData.warpList, a_motionTime);
+			if (activeRule.index != a_state.activeWarpIndex) {
+				a_state.activeWarpIndex = activeRule.index;
+				a_state.warpScale = -1.0F;
+				a_warpRuleChanged = true;
+			}
+
+			const bool animationOptIn = activeRule.limits != nullptr;
+			if (!settings::motionWarping::enabled ||
+				(!a_character->IsAttacking() && !animationOptIn) ||
+				a_motionData.translationList.empty()) {
 				return a_translation;
 			}
+			const WarpLimits limits = animationOptIn ? *activeRule.limits : WarpLimits{};
+			const auto& a_motion = a_motionData.translationList;
 
 			auto target = a_state.target.get();
 			if (!target || target->IsDead()) {
@@ -345,6 +390,12 @@ namespace hooks
 			}
 			if (!target || target->IsDead() ||
 				target->GetParentCell() != a_character->GetParentCell()) {
+				return a_translation;
+			}
+			const float currentTargetDistance =
+				HorizontalLength(target->GetPosition() - a_character->GetPosition());
+			if (animationOptIn && currentTargetDistance > limits.maximumDistance) {
+				a_state.warpScale = -1.0F;
 				return a_translation;
 			}
 
@@ -372,21 +423,28 @@ namespace hooks
 					}
 				}
 
-				const float desiredDistance = std::clamp(
-					targetDistance - settings::motionWarping::stopDistance,
+				const float desiredDistance = std::max(
 					0.0F,
-					authoredDistance);
+					targetDistance - settings::motionWarping::stopDistance);
+				const float requestedScale = desiredDistance / authoredDistance;
 				a_state.warpScale = std::clamp(
-					desiredDistance / authoredDistance,
-					0.0F,
-					1.0F);
+					requestedScale,
+					limits.lowerLimit,
+					limits.upperLimit);
 				logger::info(
-					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} targetDistance={} authoredDistance={} desiredDistance={} scale={}",
+					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} annotated={} ruleIndex={} limits=({}, {}) maximumDistance={} currentDistance={} targetDistance={} authoredDistance={} desiredDistance={} requestedScale={} scale={}",
 					a_character->GetFormID(),
 					target->GetFormID(),
+					animationOptIn,
+					a_state.activeWarpIndex,
+					limits.lowerLimit,
+					limits.upperLimit,
+					limits.maximumDistance,
+					currentTargetDistance,
 					targetDistance,
 					authoredDistance,
 					desiredDistance,
+					requestedScale,
 					a_state.warpScale);
 			}
 
@@ -567,12 +625,15 @@ namespace hooks
 			}
 
 			bool warpApplied = false;
+			bool warpRuleChanged = false;
 			const RE::NiPoint3 warped = WarpTranslation(
 				a_translation,
-				a_motionData.translationList,
+				a_motionData,
+				a_motionTime,
 				state,
 				a_character,
-				warpApplied);
+				warpApplied,
+				warpRuleChanged);
 #ifdef AMR_ENABLE_TRUEHUD_DEBUG
 			if (warpApplied) {
 				const auto& authoredEnd = a_motionData.translationList.back().delta;
@@ -589,7 +650,8 @@ namespace hooks
 				}
 			}
 #endif
-			if (state.previousMotionTime >= 0.0F && warpApplied != state.wasWarping) {
+			if (state.previousMotionTime >= 0.0F &&
+				(warpApplied != state.wasWarping || warpRuleChanged)) {
 				logger::info(
 					"[AMR-DIAG][warp] clip='{}' state={} attacking={} time={}",
 					a_clipName,
@@ -597,10 +659,11 @@ namespace hooks
 					isAttacking,
 					a_motionTime);
 			}
-			if (state.previousMotionTime >= 0.0F && warpApplied != state.wasWarping) {
-				// Rebase only when warping actually starts or stops. An attack-state,
-				// target, or angle-gate change can disable it mid-clip; subsequent frame
-				// deltas then continue from the current output instead of snapping.
+			if (state.previousMotionTime >= 0.0F &&
+				(warpApplied != state.wasWarping || warpRuleChanged)) {
+				// Rebase when warping starts, stops, or a timestamped animwarp rule
+				// changes. Subsequent deltas continue from the current output instead
+				// of snapping to the newly scaled cumulative position.
 				state.blockedOffset.x = warped.x - state.lastOutput.x;
 				state.blockedOffset.y = warped.y - state.lastOutput.y;
 			}

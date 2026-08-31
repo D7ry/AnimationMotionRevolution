@@ -91,7 +91,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	}
 	settings::Init("AnimationMotionRevolution.ini");
 	logger::set_level(settings::debug::logLevel, settings::debug::logLevel);
-	logger::info("[AMR-DIAG] diagnostic build 2026-08-30-s; runtime {}", REL::Module::get().version().string());
+	logger::info("[AMR-DIAG] diagnostic build 2026-08-30-u; runtime {}", REL::Module::get().version().string());
 
 	hooks::Install();
 

@@ -10,6 +10,15 @@ struct Motion
 using Translation = Motion<RE::NiPoint3>;
 using Rotation = Motion<RE::NiQuaternion>;
 
+struct WarpLimits
+{
+	float lowerLimit{ 0.0F };
+	float upperLimit{ 1.0F };
+	float maximumDistance{ std::numeric_limits<float>::infinity() };
+};
+
+using Warp = Motion<WarpLimits>;
+
 namespace motion_detail
 {
 	inline bool ParseFloat(std::string_view& a_text, float& a_value)
@@ -35,13 +44,19 @@ namespace motion_detail
 		}
 		return true;
 	}
+
+	inline bool HasValue(std::string_view a_text)
+	{
+		return a_text.find_first_not_of(" \t") != std::string_view::npos;
+	}
 }
 
-inline std::variant<std::monostate, Translation, Rotation> ParseAnnotation(
+inline std::variant<std::monostate, Translation, Rotation, Warp> ParseAnnotation(
 	const RE::hkaAnnotationTrack::Annotation& a_annotation)
 {
 	constexpr std::string_view motionPrefix = "animmotion ";
 	constexpr std::string_view rotationPrefix = "animrotation ";
+	constexpr std::string_view warpPrefix = "animwarp ";
 	const std::string_view text{ a_annotation.text.c_str() };
 
 	if (text.starts_with(motionPrefix)) {
@@ -68,6 +83,20 @@ inline std::variant<std::monostate, Translation, Rotation> ParseAnnotation(
 				0.0F,
 				std::sin(yaw * 0.5F) }
 		};
+	} else if (text.starts_with(warpPrefix)) {
+		auto values = text.substr(warpPrefix.size());
+		WarpLimits limits{};
+		if (motion_detail::ParseFloat(values, limits.lowerLimit) &&
+			motion_detail::ParseFloat(values, limits.upperLimit) &&
+			limits.lowerLimit >= 0.0F && limits.upperLimit >= limits.lowerLimit) {
+			if (motion_detail::HasValue(values) &&
+				(!motion_detail::ParseFloat(values, limits.maximumDistance) ||
+					limits.maximumDistance < 0.0F ||
+					motion_detail::HasValue(values))) {
+				return {};
+			}
+			return Warp{ a_annotation.time, limits };
+		}
 	}
 
 	return {};
