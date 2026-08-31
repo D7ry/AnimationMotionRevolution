@@ -29,9 +29,9 @@ namespace utils
 #pragma pack(pop)
 
 			return sizeof(TrampolineAssembly);
+		} else {
+			return sizeof(std::uintptr_t);
 		}
-		
-		return sizeof(std::uintptr_t);
 	}
 
 	template <std::size_t N>

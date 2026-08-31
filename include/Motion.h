@@ -14,6 +14,7 @@ struct WarpLimits
 {
 	float lowerLimit{ 0.0F };
 	float upperLimit{ 1.0F };
+	float maximumAngleDegrees{ 60.0F };
 	float maximumDistance{ std::numeric_limits<float>::infinity() };
 };
 
@@ -89,10 +90,20 @@ inline std::variant<std::monostate, Translation, Rotation, Warp> ParseAnnotation
 		if (motion_detail::ParseFloat(values, limits.lowerLimit) &&
 			motion_detail::ParseFloat(values, limits.upperLimit) &&
 			limits.lowerLimit >= 0.0F && limits.upperLimit >= limits.lowerLimit) {
-			if (motion_detail::HasValue(values) &&
-				(!motion_detail::ParseFloat(values, limits.maximumDistance) ||
-					limits.maximumDistance < 0.0F ||
-					motion_detail::HasValue(values))) {
+			if (motion_detail::HasValue(values)) {
+				if (!motion_detail::ParseFloat(values, limits.maximumAngleDegrees) ||
+					limits.maximumAngleDegrees < 0.0F ||
+					limits.maximumAngleDegrees > 180.0F) {
+					return {};
+				}
+			}
+			if (motion_detail::HasValue(values)) {
+				if (!motion_detail::ParseFloat(values, limits.maximumDistance) ||
+					limits.maximumDistance < 0.0F) {
+					return {};
+				}
+			}
+			if (motion_detail::HasValue(values)) {
 				return {};
 			}
 			return Warp{ a_annotation.time, limits };

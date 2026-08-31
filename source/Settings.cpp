@@ -35,22 +35,62 @@ namespace settings
 			static_cast<long>(logger::level::off));
 		debug::logLevel = static_cast<logger::level>(logLevelValue);
 
-		rayCast::enabled = ini.GetBoolValue("RayCast", "bEnable", rayCast::enabled);
-		rayCast::debugDraw =
-			ini.GetBoolValue("RayCast", "bDebugDraw", rayCast::debugDraw);
-		rayCast::startHeight =
-			ReadNonNegative(ini, "RayCast", "fStartHeight", rayCast::startHeight);
-		rayCast::downwardLength =
-			ReadNonNegative(ini, "RayCast", "fDownwardLength", rayCast::downwardLength);
-		rayCast::minimumHorizontalDelta =
+		edgeProtection::enableForAttackAnimations = ini.GetBoolValue(
+			"EdgeProtection",
+			"bEnableForAttackAnimations",
+			edgeProtection::enableForAttackAnimations);
+		edgeProtection::debugDraw = ini.GetBoolValue(
+			"EdgeProtection",
+			"bDebugDraw",
+			edgeProtection::debugDraw);
+		edgeProtection::startHeight = ReadNonNegative(
+			ini,
+			"EdgeProtection",
+			"fRaycastStartHeight",
+			edgeProtection::startHeight);
+		edgeProtection::downwardRange = ReadNonNegative(
+			ini,
+			"EdgeProtection",
+			"fRaycastDownwardRange",
+			edgeProtection::downwardRange);
+		edgeProtection::minimumHorizontalDelta =
 			ReadNonNegative(
 				ini,
-				"RayCast",
+				"EdgeProtection",
 				"fMinimumHorizontalDelta",
-				rayCast::minimumHorizontalDelta);
+				edgeProtection::minimumHorizontalDelta);
 
-		motionWarping::enabled =
-			ini.GetBoolValue("MotionWarping", "bEnable", motionWarping::enabled);
+		motionWarping::enableForAttackAnimations = ini.GetBoolValue(
+			"MotionWarping",
+			"bEnableForAttackAnimations",
+			motionWarping::enableForAttackAnimations);
+		const float defaultMinimumScale = ReadNonNegative(
+			ini,
+			"MotionWarping",
+			"fDefaultMinimumScale",
+			motionWarping::defaultMinimumScale);
+		const float defaultMaximumScale = ReadNonNegative(
+			ini,
+			"MotionWarping",
+			"fDefaultMaximumScale",
+			motionWarping::defaultMaximumScale);
+		if (defaultMaximumScale >= defaultMinimumScale) {
+			motionWarping::defaultMinimumScale = defaultMinimumScale;
+			motionWarping::defaultMaximumScale = defaultMaximumScale;
+		} else {
+			logger::warn(
+				"MotionWarping default maximum scale is below its minimum; using {}..{}",
+				motionWarping::defaultMinimumScale,
+				motionWarping::defaultMaximumScale);
+		}
+		motionWarping::defaultMaximumAngleDegrees = std::clamp(
+			ReadNonNegative(
+				ini,
+				"MotionWarping",
+				"fDefaultMaximumAngleDegrees",
+				motionWarping::defaultMaximumAngleDegrees),
+			0.0F,
+			180.0F);
 		motionWarping::stopDistance =
 			ReadNonNegative(
 				ini,
@@ -63,26 +103,21 @@ namespace settings
 				"MotionWarping",
 				"fMinimumAuthoredDistance",
 				motionWarping::minimumAuthoredDistance);
-		motionWarping::maximumTargetAngleDegrees = std::clamp(
-			ReadNonNegative(
-				ini,
-				"MotionWarping",
-				"fMaximumTargetAngleDegrees",
-				motionWarping::maximumTargetAngleDegrees),
-			0.0F,
-			180.0F);
-
-		if (rayCast::downwardLength <= std::numeric_limits<float>::epsilon()) {
-			logger::warn("RayCast.fDownwardLength must be positive; ray-cast limiting was disabled");
-			rayCast::enabled = false;
+		if (edgeProtection::downwardRange <= std::numeric_limits<float>::epsilon()) {
+			logger::warn(
+				"EdgeProtection.fRaycastDownwardRange must be positive; edge protection was disabled");
+			edgeProtection::enableForAttackAnimations = false;
 		}
 
 		logger::info(
-			"Settings: rayCast={}, rayDebugDraw={}, motionWarping={}, extension=disabled, stopDistance={} units, maxAngle={} degrees",
-			rayCast::enabled,
-			rayCast::debugDraw,
-			motionWarping::enabled,
+			"Settings: attackWarping={} defaultScale=({}, {}) defaultAngle={} stopDistance={} attackEdgeProtection={} rayDownRange={} edgeDebugDraw={}",
+			motionWarping::enableForAttackAnimations,
+			motionWarping::defaultMinimumScale,
+			motionWarping::defaultMaximumScale,
+			motionWarping::defaultMaximumAngleDegrees,
 			motionWarping::stopDistance,
-			motionWarping::maximumTargetAngleDegrees);
+			edgeProtection::enableForAttackAnimations,
+			edgeProtection::downwardRange,
+			edgeProtection::debugDraw);
 	}
 }

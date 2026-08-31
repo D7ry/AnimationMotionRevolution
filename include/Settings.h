@@ -15,20 +15,22 @@ namespace settings
 		inline logger::level logLevel = logger::level::info;
 	}
 
-	namespace rayCast
+	namespace edgeProtection
 	{
-		inline bool enabled = true;
+		inline bool enableForAttackAnimations = true;
 		inline bool debugDraw = true;
 		inline float startHeight = 50.0F;
-		inline float downwardLength = 200.0F;
+		inline float downwardRange = 200.0F;
 		inline float minimumHorizontalDelta = 0.10F;
 	}
 
 	namespace motionWarping
 	{
-		inline bool enabled = true;
+		inline bool enableForAttackAnimations = true;
+		inline float defaultMinimumScale = 0.0F;
+		inline float defaultMaximumScale = 1.0F;
+		inline float defaultMaximumAngleDegrees = 60.0F;
 		inline float stopDistance = 0.0F;
 		inline float minimumAuthoredDistance = 1.0F;
-		inline float maximumTargetAngleDegrees = 60.0F;
 	}
 }

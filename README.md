@@ -17,7 +17,7 @@ The CommonLibSSE-NG submodule is pinned to tag v6.8.0, commit
 
 ### Downward ground probe
 
-For each player frame driven by an animmotion curve, AMR evaluates the next
+For each attacking-actor frame driven by an animmotion curve, AMR evaluates the next
 horizontal root-motion step after warping. It casts a ray straight down on the
 world Z axis at that predicted destination. If no support is hit, the horizontal
 step is suppressed without accumulating a later catch-up jump. Vertical root
@@ -36,16 +36,22 @@ gate limits scaling to animations already directed roughly toward the target.
 Animations can override the attack-only default with timestamped annotations:
 
 ```text
-animwarp <lowerScale> <upperScale> [maximumDistance]
+animwarp <lowerScale> <upperScale> [maximumAngleDegrees] [maximumDistance]
 ```
 
 The most recent `animwarp` at or before the current animation time controls the
 allowed horizontal scale and enables warping even while the actor is not
 attacking. Later annotations replace earlier ones. Before the first annotation,
-or when none exist, AMR remains attack-only with implicit limits `0 1`.
-The optional third value is a maximum current horizontal actor-to-target
-distance. Beyond it, that annotated rule is inactive and authored motion plays
-unchanged. Omitting it means there is no distance cap.
+or when none exist, AMR uses the INI-configured attack-animation defaults.
+The optional angle defaults to 60 degrees and replaces the direction-angle limit
+for that rule. The optional distance is a maximum current horizontal
+actor-to-target distance; beyond it, the rule is inactive and authored motion
+plays unchanged. Distance defaults to unlimited. Because arguments are
+positional, an angle must be supplied before a distance.
+
+The INI can disable default warping for attack animations without disabling
+animations that explicitly opt in through an active `animwarp` annotation.
+Default unannotated minimum/maximum scale and angle are independently configurable.
 
 ### TrueHUD debug visualization
 

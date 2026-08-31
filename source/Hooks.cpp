@@ -310,6 +310,17 @@ namespace hooks
 			return std::hypot(a_vector.x, a_vector.y);
 		}
 
+		WarpLimits GetDefaultWarpLimits()
+		{
+			return {
+				.lowerLimit = settings::motionWarping::defaultMinimumScale,
+				.upperLimit = settings::motionWarping::defaultMaximumScale,
+				.maximumAngleDegrees =
+					settings::motionWarping::defaultMaximumAngleDegrees,
+				.maximumDistance = std::numeric_limits<float>::infinity()
+			};
+		}
+
 		bool HasVerticalMotion(const std::vector<Translation>& a_motion)
 		{
 			return std::any_of(
@@ -374,12 +385,14 @@ namespace hooks
 			}
 
 			const bool animationOptIn = activeRule.limits != nullptr;
-			if (!settings::motionWarping::enabled ||
-				(!a_character->IsAttacking() && !animationOptIn) ||
+			if ((!animationOptIn &&
+					(!a_character->IsAttacking() ||
+						!settings::motionWarping::enableForAttackAnimations)) ||
 				a_motionData.translationList.empty()) {
 				return a_translation;
 			}
-			const WarpLimits limits = animationOptIn ? *activeRule.limits : WarpLimits{};
+			const WarpLimits limits =
+				animationOptIn ? *activeRule.limits : GetDefaultWarpLimits();
 			const auto& a_motion = a_motionData.translationList;
 
 			auto target = a_state.target.get();
@@ -418,7 +431,7 @@ namespace hooks
 						1.0F);
 					const float angle =
 						std::acos(cosine) * 180.0F / std::numbers::pi_v<float>;
-					if (angle > settings::motionWarping::maximumTargetAngleDegrees) {
+					if (angle > limits.maximumAngleDegrees) {
 						return a_translation;
 					}
 				}
@@ -432,13 +445,14 @@ namespace hooks
 					limits.lowerLimit,
 					limits.upperLimit);
 				logger::info(
-					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} annotated={} ruleIndex={} limits=({}, {}) maximumDistance={} currentDistance={} targetDistance={} authoredDistance={} desiredDistance={} requestedScale={} scale={}",
+					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} annotated={} ruleIndex={} limits=({}, {}) maximumAngle={} maximumDistance={} currentDistance={} targetDistance={} authoredDistance={} desiredDistance={} requestedScale={} scale={}",
 					a_character->GetFormID(),
 					target->GetFormID(),
 					animationOptIn,
 					a_state.activeWarpIndex,
 					limits.lowerLimit,
 					limits.upperLimit,
+					limits.maximumAngleDegrees,
 					limits.maximumDistance,
 					currentTargetDistance,
 					targetDistance,
@@ -539,8 +553,8 @@ namespace hooks
 			// GetWorldScaleInverse() converts in the opposite direction and places
 			// the ray thousands of Havok units away from the destination.
 			const float scale = RE::bhkWorld::GetWorldScale();
-			const float startZ = a_position.z + settings::rayCast::startHeight;
-			const float endZ = startZ - settings::rayCast::downwardLength;
+			const float startZ = a_position.z + settings::edgeProtection::startHeight;
+			const float endZ = startZ - settings::edgeProtection::downwardRange;
 			result.startZ = startZ;
 			result.endZ = endZ;
 			result.worldScale = scale;
@@ -594,7 +608,7 @@ namespace hooks
 				ResetTranslationRuntime(state, a_character);
 				const auto& authoredEnd = a_motionData.translationList.back().delta;
 				logger::info(
-					"[AMR-DIAG][motion-start] actor=0x{:08X} clip='{}' time={} keys={} authoredEnd=({}, {}, {}) position=({}, {}, {}) verticalMotion={} rayCast={} warping={} attacking={}",
+					"[AMR-DIAG][motion-start] actor=0x{:08X} clip='{}' time={} keys={} authoredEnd=({}, {}, {}) position=({}, {}, {}) verticalMotion={} attackEdgeProtection={} defaultAttackWarping={} attacking={}",
 					a_character->GetFormID(),
 					a_clipName,
 					a_motionTime,
@@ -606,8 +620,8 @@ namespace hooks
 					a_character->GetPositionY(),
 					a_character->GetPositionZ(),
 					hasVerticalMotion,
-					settings::rayCast::enabled,
-					settings::motionWarping::enabled,
+					settings::edgeProtection::enableForAttackAnimations,
+					settings::motionWarping::enableForAttackAnimations,
 					a_character->IsAttacking());
 			}
 
@@ -673,8 +687,10 @@ namespace hooks
 			const RE::NiPoint3 localDelta = output - state.lastOutput;
 			const RE::NiPoint3 intendedLocalDelta = warped - state.lastWarped;
 
-			if (settings::rayCast::enabled && isAttacking && !hasVerticalMotion &&
-				HorizontalLength(localDelta) >= settings::rayCast::minimumHorizontalDelta) {
+			if (settings::edgeProtection::enableForAttackAnimations && isAttacking &&
+				!hasVerticalMotion &&
+				HorizontalLength(localDelta) >=
+					settings::edgeProtection::minimumHorizontalDelta) {
 				const RE::NiPoint3 worldDelta =
 					LocalToWorld(localDelta, a_character->GetAngleZ());
 				const RE::NiPoint3 predictedCenter = a_character->GetPosition() + worldDelta;
@@ -694,7 +710,7 @@ namespace hooks
 
 				const auto probe = ProbeGroundAt(a_character, probePosition);
 #ifdef AMR_ENABLE_TRUEHUD_DEBUG
-				if (settings::rayCast::debugDraw) {
+				if (settings::edgeProtection::debugDraw) {
 					const RE::NiPoint3 rayStart{
 						probePosition.x, probePosition.y, probe.startZ };
 					const RE::NiPoint3 rayEnd{
