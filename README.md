@@ -97,6 +97,10 @@ drawn.
 Settings live in
 Data/SKSE/Plugins/AnimationMotionRevolution.ini.
 
+Full annotation documentation is available in
+[English](docs/animwarp.md), [Simplified Chinese](docs/animwarp.zh-CN.md), and
+[Korean](docs/animwarp.ko-KR.md).
+
 ## Build
 
 Set VCPKG_ROOT to a valid vcpkg checkout, initialize submodules, and run:
