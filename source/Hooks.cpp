@@ -9,9 +9,9 @@
 #include "utils/Logger.h"
 #include "utils/Trampoline.h"
 
-#include "RE/B/bhkPickData.h"
 #include "RE/B/bhkCharProxyController.h"
 #include "RE/B/bhkCharRigidBodyController.h"
+#include "RE/B/bhkPickData.h"
 #include "RE/C/CFilter.h"
 #include "RE/H/hkpCharacterProxy.h"
 #include "RE/H/hkpCharacterRigidBody.h"
@@ -104,8 +104,8 @@ namespace hooks
 		const RE::hkaAnimation* GetBoundAnimation(const RE::hkbClipGenerator* a_clip)
 		{
 			return a_clip && a_clip->binding && a_clip->binding->animation ?
-				       a_clip->binding->animation.get() :
-				       nullptr;
+					   a_clip->binding->animation.get() :
+					   nullptr;
 		}
 
 		std::uint32_t ComputeStartTimeHook(
@@ -130,9 +130,35 @@ namespace hooks
 			AnimMotionData parsed{ boundAnimation };
 			for (const auto& annotationTrack : boundAnimation->annotationTracks) {
 				for (const auto& annotation : annotationTrack.annotations) {
+					const std::string_view annotationText{ annotation.text.c_str() };
+					const bool isWarpControl = IsWarpControlAnnotation(annotationText);
+					if (isWarpControl) {
+						parsed.MarkExplicitWarpControl();
+					}
 					auto parsedAnnotation = ParseAnnotation(annotation);
 					if (const auto* warp = std::get_if<Warp>(&parsedAnnotation)) {
-						parsed.Add(*warp);
+						if (!parsed.Add(*warp)) {
+							logger::warn(
+								"Ignoring warp control with a non-finite timestamp in animation '{}': '{}'",
+								a_clip->animationName.c_str(),
+								annotation.text.c_str());
+						}
+					} else if (const auto* warpEnd = std::get_if<WarpEnd>(&parsedAnnotation)) {
+						if (!parsed.Add(*warpEnd)) {
+							logger::warn(
+								"Ignoring warp control with a non-finite timestamp in animation '{}': '{}'",
+								a_clip->animationName.c_str(),
+								annotation.text.c_str());
+						}
+					} else if (isWarpControl) {
+						logger::warn(
+							"Ignoring malformed warp control in animation '{}' at {}: '{}'",
+							a_clip->animationName.c_str(),
+							annotation.time,
+							annotation.text.c_str());
+					}
+					if (IsCombatWarpBoundary(annotationText)) {
+						parsed.AddCombatWarpBoundary(annotation.time);
 					}
 				}
 			}
@@ -153,8 +179,20 @@ namespace hooks
 
 			if (!parsed.translationList.empty() || !parsed.rotationList.empty()) {
 				parsed.SortListsByTime();
+				if (!parsed.translationList.empty()) {
+					const float motionEndTime = parsed.translationList.back().time;
+					for (const auto& marker : parsed.warpMarkers) {
+						if (marker.time < 0.0F || marker.time > motionEndTime) {
+							logger::warn(
+								"Warp control in animation '{}' at {} is outside animmotion range 0..{} and is clamped",
+								a_clip->animationName.c_str(),
+								marker.time,
+								motionEndTime);
+						}
+					}
+				}
 				logger::info(
-					"[AMR-DIAG][activate] clip='{}' animation='{}' character={} duration={} tracks={} translationKeys={} rotationKeys={} warpKeys={} translationEnd=({}, {}, {})",
+					"[AMR-DIAG][activate] clip='{}' animation='{}' character={} duration={} tracks={} translationKeys={} rotationKeys={} warpMarkers={} combatBoundaries={} warpSegments={} explicitWarpTimeline={} translationEnd=({}, {}, {})",
 					a_clip->name.c_str(),
 					a_clip->animationName.c_str(),
 					static_cast<const void*>(hkbCharacter),
@@ -162,10 +200,47 @@ namespace hooks
 					boundAnimation->annotationTracks.size(),
 					parsed.translationList.size(),
 					parsed.rotationList.size(),
-					parsed.warpList.size(),
+					parsed.warpMarkers.size(),
+					parsed.combatWarpBoundaries.size(),
+					parsed.warpSegments.size(),
+					parsed.hasExplicitWarpControl,
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.x,
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.y,
 					parsed.translationList.empty() ? 0.0F : parsed.translationList.back().delta.z);
+				for (std::size_t index = 0; index < parsed.warpSegments.size(); ++index) {
+					const auto& segment = parsed.warpSegments[index];
+					const auto segmentMotion = segment.endTranslation - segment.startTranslation;
+					const char* kind = "inactive";
+					if (segment.kind == AnimMotionData::WarpSegmentKind::kExplicit) {
+						kind = "explicit";
+					} else if (segment.kind == AnimMotionData::WarpSegmentKind::kDefaultCombat) {
+						kind = "default-combat";
+					}
+					const WarpLimits displayedLimits =
+						segment.kind == AnimMotionData::WarpSegmentKind::kDefaultCombat ?
+							WarpLimits{
+								.lowerLimit = settings::motionWarping::defaultMinimumScale,
+								.upperLimit = settings::motionWarping::defaultMaximumScale,
+								.maximumAngleDegrees =
+									settings::motionWarping::defaultMaximumAngleDegrees,
+								.maximumDistance = std::numeric_limits<float>::infinity()
+							} :
+							segment.limits;
+					logger::info(
+						"[AMR-DIAG][segment] clip='{}' index={} kind={} time=({}, {}) motion=({}, {}, {}) limits=({}, {}) angle={} distance={}",
+						a_clip->name.c_str(),
+						index,
+						kind,
+						segment.startTime,
+						segment.endTime,
+						segmentMotion.x,
+						segmentMotion.y,
+						segmentMotion.z,
+						displayedLimits.lowerLimit,
+						displayedLimits.upperLimit,
+						displayedLimits.maximumAngleDegrees,
+						displayedLimits.maximumDistance);
+				}
 
 				if (!parsed.translationList.empty() &&
 					std::abs(parsed.translationList.back().time - boundAnimation->duration) >
@@ -252,8 +327,8 @@ namespace hooks
 					const float previousTime = index > 0 ? a_motion[index - 1].time : 0.0F;
 					const float duration = current.time - previousTime;
 					const float progress = duration > kMotionTimeEpsilon ?
-						                       (currentTime - previousTime) / duration :
-						                       1.0F;
+											   (currentTime - previousTime) / duration :
+											   1.0F;
 					a_translation =
 						current.delta * progress + previousDelta * (1.0F - progress);
 					return true;
@@ -279,12 +354,12 @@ namespace hooks
 				if (currentTime <= current.time) {
 					const RE::NiQuaternion previous =
 						index > 0 ? a_motion[index - 1].delta :
-						            RE::NiQuaternion{ 1.0F, 0.0F, 0.0F, 0.0F };
+									RE::NiQuaternion{ 1.0F, 0.0F, 0.0F, 0.0F };
 					const float previousTime = index > 0 ? a_motion[index - 1].time : 0.0F;
 					const float duration = current.time - previousTime;
 					const float progress = duration > kMotionTimeEpsilon ?
-						                       (currentTime - previousTime) / duration :
-						                       1.0F;
+											   (currentTime - previousTime) / duration :
+											   1.0F;
 					g_interpolateRotation(a_rotation, progress, previous, current.delta);
 					return true;
 				}
@@ -331,25 +406,38 @@ namespace hooks
 				});
 		}
 
-		struct ActiveWarpRule
+		struct ActiveWarpSegment
 		{
-			const WarpLimits* limits{ nullptr };
+			const AnimMotionData::WarpSegment* segment{ nullptr };
 			std::size_t index{ std::numeric_limits<std::size_t>::max() };
 		};
 
-		ActiveWarpRule GetActiveWarpRule(
-			const std::vector<Warp>& a_warp,
+		ActiveWarpSegment GetActiveWarpSegment(
+			const std::vector<AnimMotionData::WarpSegment>& a_segments,
 			float a_motionTime)
 		{
-			ActiveWarpRule result{};
-			for (std::size_t index = 0; index < a_warp.size(); ++index) {
-				if (a_warp[index].time > a_motionTime + kMotionTimeEpsilon) {
-					break;
-				}
-				result.limits = std::addressof(a_warp[index].delta);
-				result.index = index;
+			const auto found = std::ranges::upper_bound(
+				a_segments,
+				a_motionTime,
+				{},
+				[](const AnimMotionData::WarpSegment& a_segment) {
+					return a_segment.startTime;
+				});
+			if (found == a_segments.begin()) {
+				return {};
 			}
-			return result;
+
+			const auto segment = std::prev(found);
+			// Segments are half-open. A marker at this exact timestamp owns the
+			// frame, while the final endpoint has no active segment.
+			if (a_motionTime < segment->startTime || a_motionTime >= segment->endTime) {
+				return {};
+			}
+
+			return {
+				std::addressof(*segment),
+				static_cast<std::size_t>(segment - a_segments.begin())
+			};
 		}
 
 		void ResetTranslationRuntime(
@@ -360,10 +448,122 @@ namespace hooks
 			a_state.initialized = true;
 			a_state.wasAttacking = a_character->IsAttacking();
 			a_state.previousMotionTime = -1.0F;
-			a_state.origin = a_character->GetPosition();
-			a_state.originYaw = a_character->GetAngleZ();
-
 			a_state.target = a_character->GetActorRuntimeData().currentCombatTarget;
+		}
+
+		struct WarpEvaluation
+		{
+			bool applied{ false };
+			float scale{ 1.0F };
+			RE::ActorHandle target{};
+		};
+
+		WarpEvaluation EvaluateWarpSegment(
+			const AnimMotionData::WarpSegment& a_segment,
+			std::size_t a_segmentIndex,
+			const AnimMotionData::TranslationRuntimeState& a_state,
+			RE::Character* a_character,
+			const RE::NiPoint3& a_origin,
+			const RE::NiPoint3& a_authoredCursor,
+			float a_originYaw,
+			bool a_allowCachedScale)
+		{
+			WarpEvaluation result{};
+			const bool animationOptIn =
+				a_segment.kind == AnimMotionData::WarpSegmentKind::kExplicit;
+			const bool defaultCombatWarp =
+				a_segment.kind == AnimMotionData::WarpSegmentKind::kDefaultCombat &&
+				a_character->IsAttacking() &&
+				settings::motionWarping::enableForAttackAnimations;
+			if (!animationOptIn && !defaultCombatWarp) {
+				return result;
+			}
+
+			const WarpLimits limits = animationOptIn ? a_segment.limits : GetDefaultWarpLimits();
+			result.target = a_character->GetActorRuntimeData().currentCombatTarget;
+			auto target = result.target.get();
+			if (!target || target->IsDead() ||
+				target->GetParentCell() != a_character->GetParentCell()) {
+				return result;
+			}
+
+			const RE::NiPoint3 targetOffset = target->GetPosition() - a_origin;
+			const float targetDistance = HorizontalLength(targetOffset);
+			if (targetDistance > limits.maximumDistance) {
+				return result;
+			}
+
+			if (a_allowCachedScale && a_state.wasWarping && a_state.warpScale >= 0.0F &&
+				a_state.activeWarpSegmentIndex == a_segmentIndex &&
+				a_state.target == result.target) {
+				result.applied = true;
+				result.scale = a_state.warpScale;
+				return result;
+			}
+
+			// The exact segment end was sampled once during clip activation, and the
+			// current authored cursor is already available. A normal boundary uses the
+			// full segment; a late reactivation uses only what remains. Both are O(1).
+			const RE::NiPoint3 authoredWindow =
+				a_segment.endTranslation - a_authoredCursor;
+			const float authoredDistance = HorizontalLength(authoredWindow);
+			if (authoredDistance < settings::motionWarping::minimumAuthoredDistance ||
+				authoredDistance <= kVectorEpsilon) {
+				return result;
+			}
+
+			const RE::NiPoint3 authoredWorld = LocalToWorld(authoredWindow, a_originYaw);
+			if (targetDistance > kVectorEpsilon) {
+				const float cosine = std::clamp(
+					(authoredWorld.x * targetOffset.x + authoredWorld.y * targetOffset.y) /
+						(authoredDistance * targetDistance),
+					-1.0F,
+					1.0F);
+				const float angle =
+					std::acos(cosine) * 180.0F / std::numbers::pi_v<float>;
+				if (angle > limits.maximumAngleDegrees) {
+					return result;
+				}
+			}
+
+			const float desiredDistance = std::max(
+				0.0F,
+				targetDistance - settings::motionWarping::stopDistance);
+			const float requestedScale = desiredDistance / authoredDistance;
+			result.applied = true;
+			result.scale = std::clamp(
+				requestedScale,
+				limits.lowerLimit,
+				limits.upperLimit);
+			logger::info(
+				"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} explicit={} segmentIndex={} segment=({}, {}) limits=({}, {}) maximumAngle={} maximumDistance={} targetDistance={} authoredWindowDistance={} desiredDistance={} requestedScale={} scale={}",
+				a_character->GetFormID(),
+				target->GetFormID(),
+				animationOptIn,
+				a_segmentIndex,
+				a_segment.startTime,
+				a_segment.endTime,
+				limits.lowerLimit,
+				limits.upperLimit,
+				limits.maximumAngleDegrees,
+				limits.maximumDistance,
+				targetDistance,
+				authoredDistance,
+				desiredDistance,
+				requestedScale,
+				result.scale);
+			return result;
+		}
+
+		RE::NiPoint3 ApplyWarpEvaluation(
+			RE::NiPoint3 a_delta,
+			const WarpEvaluation& a_evaluation)
+		{
+			if (a_evaluation.applied) {
+				a_delta.x *= a_evaluation.scale;
+				a_delta.y *= a_evaluation.scale;
+			}
+			return a_delta;
 		}
 
 		RE::NiPoint3 WarpTranslation(
@@ -372,101 +572,109 @@ namespace hooks
 			float a_motionTime,
 			AnimMotionData::TranslationRuntimeState& a_state,
 			RE::Character* a_character,
+			ActiveWarpSegment& a_activeSegment,
 			bool& a_warpApplied,
-			bool& a_warpRuleChanged)
+			bool& a_warpSegmentChanged)
 		{
-			a_warpApplied = false;
-			a_warpRuleChanged = false;
-			const auto activeRule = GetActiveWarpRule(a_motionData.warpList, a_motionTime);
-			if (activeRule.index != a_state.activeWarpIndex) {
-				a_state.activeWarpIndex = activeRule.index;
-				a_state.warpScale = -1.0F;
-				a_warpRuleChanged = true;
-			}
+			const auto previousSegmentIndex = a_state.activeWarpSegmentIndex;
+			a_activeSegment = GetActiveWarpSegment(a_motionData.warpSegments, a_motionTime);
+			a_warpSegmentChanged = a_activeSegment.index != previousSegmentIndex;
 
-			const bool animationOptIn = activeRule.limits != nullptr;
-			if ((!animationOptIn &&
-					(!a_character->IsAttacking() ||
-						!settings::motionWarping::enableForAttackAnimations)) ||
-				a_motionData.translationList.empty()) {
-				return a_translation;
-			}
-			const WarpLimits limits =
-				animationOptIn ? *activeRule.limits : GetDefaultWarpLimits();
-			const auto& a_motion = a_motionData.translationList;
+			const float currentTime = std::max(0.0F, a_motionTime);
+			float timeCursor = a_state.previousMotionTime >= 0.0F ?
+								   std::max(0.0F, a_state.previousMotionTime) :
+								   0.0F;
+			const bool firstUpdate = a_state.previousMotionTime < 0.0F;
+			RE::NiPoint3 authoredCursor =
+				firstUpdate ? a_motionData.initialTranslation : a_state.lastAuthored;
+			// A non-zero cumulative value at t=0 is a baseline, not elapsed segment
+			// motion. Preserve it unscaled and integrate only changes after t=0.
+			RE::NiPoint3 mappedDelta = firstUpdate ? a_motionData.initialTranslation : RE::NiPoint3{};
+			const auto actorPosition = a_character->GetPosition();
+			const float actorYaw = a_character->GetAngleZ();
 
-			auto target = a_state.target.get();
-			if (!target || target->IsDead()) {
-				a_state.target = a_character->GetActorRuntimeData().currentCombatTarget;
-				a_state.warpScale = -1.0F;
-				target = a_state.target.get();
-			}
-			if (!target || target->IsDead() ||
-				target->GetParentCell() != a_character->GetParentCell()) {
-				return a_translation;
-			}
-			const float currentTargetDistance =
-				HorizontalLength(target->GetPosition() - a_character->GetPosition());
-			if (animationOptIn && currentTargetDistance > limits.maximumDistance) {
-				a_state.warpScale = -1.0F;
-				return a_translation;
-			}
+			WarpEvaluation finalEvaluation{};
+			std::size_t finalEvaluationIndex = std::numeric_limits<std::size_t>::max();
+			auto segmentIt = std::ranges::upper_bound(
+				a_motionData.warpSegments,
+				timeCursor,
+				{},
+				[](const AnimMotionData::WarpSegment& a_segment) {
+					return a_segment.endTime;
+				});
 
-			const auto& authoredEnd = a_motion.back().delta;
-			const float authoredDistance = HorizontalLength(authoredEnd);
-			if (authoredDistance < settings::motionWarping::minimumAuthoredDistance ||
-				authoredDistance <= kVectorEpsilon) {
-				return a_translation;
-			}
-
-			if (a_state.warpScale < 0.0F) {
-				const RE::NiPoint3 targetOffset = target->GetPosition() - a_state.origin;
-				const float targetDistance = HorizontalLength(targetOffset);
-				const RE::NiPoint3 authoredWorld = LocalToWorld(authoredEnd, a_state.originYaw);
-				if (targetDistance > kVectorEpsilon) {
-					const float cosine = std::clamp(
-						(authoredWorld.x * targetOffset.x + authoredWorld.y * targetOffset.y) /
-							(authoredDistance * targetDistance),
-						-1.0F,
-						1.0F);
-					const float angle =
-						std::acos(cosine) * 180.0F / std::numbers::pi_v<float>;
-					if (angle > limits.maximumAngleDegrees) {
-						return a_translation;
+			for (; segmentIt != a_motionData.warpSegments.end() && timeCursor < currentTime;
+				 ++segmentIt) {
+				if (segmentIt->endTime <= timeCursor) {
+					continue;
+				}
+				if (segmentIt->startTime > timeCursor) {
+					if (segmentIt->startTime >= currentTime) {
+						break;
 					}
+					mappedDelta += segmentIt->startTranslation - authoredCursor;
+					authoredCursor = segmentIt->startTranslation;
+					timeCursor = segmentIt->startTime;
+				}
+				if (segmentIt->startTime >= currentTime) {
+					break;
 				}
 
-				const float desiredDistance = std::max(
-					0.0F,
-					targetDistance - settings::motionWarping::stopDistance);
-				const float requestedScale = desiredDistance / authoredDistance;
-				a_state.warpScale = std::clamp(
-					requestedScale,
-					limits.lowerLimit,
-					limits.upperLimit);
-				logger::info(
-					"[AMR-DIAG][warp-scale] actor=0x{:08X} target=0x{:08X} annotated={} ruleIndex={} limits=({}, {}) maximumAngle={} maximumDistance={} currentDistance={} targetDistance={} authoredDistance={} desiredDistance={} requestedScale={} scale={}",
-					a_character->GetFormID(),
-					target->GetFormID(),
-					animationOptIn,
-					a_state.activeWarpIndex,
-					limits.lowerLimit,
-					limits.upperLimit,
-					limits.maximumAngleDegrees,
-					limits.maximumDistance,
-					currentTargetDistance,
-					targetDistance,
-					authoredDistance,
-					desiredDistance,
-					requestedScale,
-					a_state.warpScale);
+				const float pieceEndTime = std::min(currentTime, segmentIt->endTime);
+				if (pieceEndTime <= timeCursor) {
+					continue;
+				}
+				const RE::NiPoint3 pieceEndTranslation =
+					segmentIt->endTime <= currentTime ? segmentIt->endTranslation : a_translation;
+				const auto segmentIndex =
+					static_cast<std::size_t>(segmentIt - a_motionData.warpSegments.begin());
+				const RE::NiPoint3 evaluationOrigin =
+					actorPosition + LocalToWorld(mappedDelta, actorYaw);
+				const auto evaluation = EvaluateWarpSegment(
+					*segmentIt,
+					segmentIndex,
+					a_state,
+					a_character,
+					evaluationOrigin,
+					authoredCursor,
+					actorYaw,
+					segmentIndex == previousSegmentIndex);
+				mappedDelta += ApplyWarpEvaluation(
+					pieceEndTranslation - authoredCursor,
+					evaluation);
+				authoredCursor = pieceEndTranslation;
+				timeCursor = pieceEndTime;
+				finalEvaluation = evaluation;
+				finalEvaluationIndex = segmentIndex;
 			}
 
-			a_warpApplied = true;
-			RE::NiPoint3 warped = a_translation;
-			warped.x *= a_state.warpScale;
-			warped.y *= a_state.warpScale;
-			return warped;
+			if (timeCursor < currentTime) {
+				mappedDelta += a_translation - authoredCursor;
+				authoredCursor = a_translation;
+			}
+
+			if (a_activeSegment.segment &&
+				finalEvaluationIndex != a_activeSegment.index) {
+				const RE::NiPoint3 evaluationOrigin =
+					actorPosition + LocalToWorld(mappedDelta, actorYaw);
+				finalEvaluation = EvaluateWarpSegment(
+					*a_activeSegment.segment,
+					a_activeSegment.index,
+					a_state,
+					a_character,
+					evaluationOrigin,
+					authoredCursor,
+					actorYaw,
+					a_activeSegment.index == previousSegmentIndex);
+				finalEvaluationIndex = a_activeSegment.index;
+			}
+
+			a_warpApplied = a_activeSegment.segment && finalEvaluation.applied;
+			a_state.activeWarpSegmentIndex = a_activeSegment.index;
+			a_state.warpScale = a_warpApplied ? finalEvaluation.scale : -1.0F;
+			a_state.target = finalEvaluation.target;
+			a_state.lastAuthored = a_translation;
+			return a_state.lastWarped + mappedDelta;
 		}
 
 		struct GroundProbeResult
@@ -503,7 +711,7 @@ namespace hooks
 						shape = proxy->shapePhantom->collidable.shape;
 					}
 				} else if (const auto* rigidController =
-						skyrim_cast<const RE::bhkCharRigidBodyController*>(controller)) {
+							   skyrim_cast<const RE::bhkCharRigidBodyController*>(controller)) {
 					const auto* characterRigidBody = static_cast<const RE::hkpCharacterRigidBody*>(
 						rigidController->charRigidBody.referencedObject.get());
 					if (characterRigidBody && characterRigidBody->character) {
@@ -603,7 +811,7 @@ namespace hooks
 			auto& state = a_motionData.translationRuntime;
 			const bool hasVerticalMotion = HasVerticalMotion(a_motionData.translationList);
 			const bool resetRuntime = !state.initialized ||
-				a_motionTime + kMotionTimeEpsilon < state.previousMotionTime;
+									  a_motionTime + kMotionTimeEpsilon < state.previousMotionTime;
 			if (resetRuntime) {
 				ResetTranslationRuntime(state, a_character);
 				const auto& authoredEnd = a_motionData.translationList.back().delta;
@@ -632,54 +840,56 @@ namespace hooks
 			}
 
 			const bool isAttacking = a_character->IsAttacking();
-			const bool attackStateChanged = isAttacking != state.wasAttacking;
-			if (attackStateChanged && isAttacking) {
-				state.target = a_character->GetActorRuntimeData().currentCombatTarget;
-				state.warpScale = -1.0F;
-			}
-
+			ActiveWarpSegment activeWarpSegment{};
 			bool warpApplied = false;
-			bool warpRuleChanged = false;
+			bool warpSegmentChanged = false;
 			const RE::NiPoint3 warped = WarpTranslation(
 				a_translation,
 				a_motionData,
 				a_motionTime,
 				state,
 				a_character,
+				activeWarpSegment,
 				warpApplied,
-				warpRuleChanged);
+				warpSegmentChanged);
 #ifdef AMR_ENABLE_TRUEHUD_DEBUG
-			if (warpApplied) {
-				const auto& authoredEnd = a_motionData.translationList.back().delta;
-				RE::NiPoint3 warpedEnd = authoredEnd;
-				warpedEnd.x *= state.warpScale;
-				warpedEnd.y *= state.warpScale;
-				const auto target = state.target.get();
-				if (target) {
-					truehud::DrawMotionWarp(
-						state.origin,
-						state.origin + LocalToWorld(authoredEnd, state.originYaw),
-						state.origin + LocalToWorld(warpedEnd, state.originYaw),
-						target->GetPosition());
+			const bool warpSegmentEnabled =
+				activeWarpSegment.segment &&
+				(activeWarpSegment.segment->kind ==
+						 AnimMotionData::WarpSegmentKind::kExplicit ||
+					(activeWarpSegment.segment->kind ==
+						 AnimMotionData::WarpSegmentKind::kDefaultCombat &&
+					 settings::motionWarping::enableForAttackAnimations &&
+					 isAttacking));
+			const bool visualizeWarpActivation =
+				warpSegmentEnabled &&
+				(warpSegmentChanged || (warpApplied && !state.wasWarping));
+			if (visualizeWarpActivation) {
+				const RE::NiPoint3 authoredSegment =
+					activeWarpSegment.segment->endTranslation -
+					activeWarpSegment.segment->startTranslation;
+				RE::NiPoint3 warpedSegment = authoredSegment;
+				if (warpApplied) {
+					warpedSegment.x *= state.warpScale;
+					warpedSegment.y *= state.warpScale;
 				}
+				const auto actorPosition = a_character->GetPosition();
+				const float actorYaw = a_character->GetAngleZ();
+				truehud::DrawMotionWarp(
+					actorPosition,
+					authoredSegment,
+					warpApplied ? std::addressof(warpedSegment) : nullptr,
+					actorYaw);
 			}
 #endif
 			if (state.previousMotionTime >= 0.0F &&
-				(warpApplied != state.wasWarping || warpRuleChanged)) {
+				(warpApplied != state.wasWarping || warpSegmentChanged)) {
 				logger::info(
 					"[AMR-DIAG][warp] clip='{}' state={} attacking={} time={}",
 					a_clipName,
 					warpApplied ? "applied" : "inactive",
 					isAttacking,
 					a_motionTime);
-			}
-			if (state.previousMotionTime >= 0.0F &&
-				(warpApplied != state.wasWarping || warpRuleChanged)) {
-				// Rebase when warping starts, stops, or a timestamped animwarp rule
-				// changes. Subsequent deltas continue from the current output instead
-				// of snapping to the newly scaled cumulative position.
-				state.blockedOffset.x = warped.x - state.lastOutput.x;
-				state.blockedOffset.y = warped.y - state.lastOutput.y;
 			}
 			state.wasAttacking = isAttacking;
 			state.wasWarping = warpApplied;
@@ -712,9 +922,11 @@ namespace hooks
 #ifdef AMR_ENABLE_TRUEHUD_DEBUG
 				if (settings::edgeProtection::debugDraw) {
 					const RE::NiPoint3 rayStart{
-						probePosition.x, probePosition.y, probe.startZ };
+						probePosition.x, probePosition.y, probe.startZ
+					};
 					const RE::NiPoint3 rayEnd{
-						probePosition.x, probePosition.y, probe.endZ };
+						probePosition.x, probePosition.y, probe.endZ
+					};
 					truehud::DrawGroundProbe(
 						predictedCenter,
 						probePosition,

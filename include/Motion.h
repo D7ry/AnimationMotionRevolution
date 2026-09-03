@@ -20,8 +20,20 @@ struct WarpLimits
 
 using Warp = Motion<WarpLimits>;
 
+struct WarpEnd
+{
+	float time;
+};
+
 namespace motion_detail
 {
+	inline bool HasExactToken(std::string_view a_text, std::string_view a_token)
+	{
+		return a_text.starts_with(a_token) &&
+			   (a_text.size() == a_token.size() || a_text[a_token.size()] == ' ' ||
+				   a_text[a_token.size()] == '\t');
+	}
+
 	inline bool ParseFloat(std::string_view& a_text, float& a_value)
 	{
 		const auto first = a_text.find_first_not_of(" \t");
@@ -52,12 +64,19 @@ namespace motion_detail
 	}
 }
 
-inline std::variant<std::monostate, Translation, Rotation, Warp> ParseAnnotation(
+inline bool IsWarpControlAnnotation(std::string_view a_text)
+{
+	return motion_detail::HasExactToken(a_text, "animwarp") ||
+		   motion_detail::HasExactToken(a_text, "animwarpend");
+}
+
+inline std::variant<std::monostate, Translation, Rotation, Warp, WarpEnd> ParseAnnotation(
 	const RE::hkaAnnotationTrack::Annotation& a_annotation)
 {
 	constexpr std::string_view motionPrefix = "animmotion ";
 	constexpr std::string_view rotationPrefix = "animrotation ";
-	constexpr std::string_view warpPrefix = "animwarp ";
+	constexpr std::string_view warpToken = "animwarp";
+	constexpr std::string_view warpEndToken = "animwarpend";
 	const std::string_view text{ a_annotation.text.c_str() };
 
 	if (text.starts_with(motionPrefix)) {
@@ -84,8 +103,8 @@ inline std::variant<std::monostate, Translation, Rotation, Warp> ParseAnnotation
 				0.0F,
 				std::sin(yaw * 0.5F) }
 		};
-	} else if (text.starts_with(warpPrefix)) {
-		auto values = text.substr(warpPrefix.size());
+	} else if (motion_detail::HasExactToken(text, warpToken)) {
+		auto values = text.substr(warpToken.size());
 		WarpLimits limits{};
 		if (motion_detail::ParseFloat(values, limits.lowerLimit) &&
 			motion_detail::ParseFloat(values, limits.upperLimit) &&
@@ -108,7 +127,50 @@ inline std::variant<std::monostate, Translation, Rotation, Warp> ParseAnnotation
 			}
 			return Warp{ a_annotation.time, limits };
 		}
+	} else if (motion_detail::HasExactToken(text, warpEndToken) &&
+			   !motion_detail::HasValue(text.substr(warpEndToken.size()))) {
+		return WarpEnd{ a_annotation.time };
 	}
 
 	return {};
+}
+
+inline bool IsCombatWarpBoundary(std::string_view a_text)
+{
+	constexpr std::string_view hitFrame = "hitframe";
+	constexpr std::string_view collisionAdd = "collision_add";
+
+	const auto first = a_text.find_first_not_of(" \t");
+	if (first == std::string_view::npos) {
+		return false;
+	}
+	a_text.remove_prefix(first);
+
+	auto equalsIgnoreCase = [](std::string_view a_value, std::string_view a_expected) {
+		return a_value.size() == a_expected.size() &&
+			   std::ranges::equal(
+				   a_value,
+				   a_expected,
+				   [](char a_lhs, char a_rhs) {
+					   return static_cast<char>(std::tolower(static_cast<unsigned char>(a_lhs))) ==
+							  static_cast<char>(std::tolower(static_cast<unsigned char>(a_rhs)));
+				   });
+	};
+
+	auto startsWithIgnoreCase = [&equalsIgnoreCase](
+									std::string_view a_value,
+									std::string_view a_expected) {
+		return a_value.size() >= a_expected.size() &&
+			   equalsIgnoreCase(a_value.substr(0, a_expected.size()), a_expected);
+	};
+
+	const auto eventEnd = a_text.find('.');
+	auto eventName = a_text.substr(0, eventEnd);
+	while (!eventName.empty() &&
+		   (eventName.back() == ' ' || eventName.back() == '\t')) {
+		eventName.remove_suffix(1);
+	}
+
+	return equalsIgnoreCase(eventName, hitFrame) ||
+		   startsWithIgnoreCase(a_text, collisionAdd);
 }

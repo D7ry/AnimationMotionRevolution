@@ -8,9 +8,9 @@ namespace truehud
 
 	void DrawMotionWarp(
 		const RE::NiPoint3& a_origin,
-		const RE::NiPoint3& a_authoredDestination,
-		const RE::NiPoint3& a_warpedDestination,
-		const RE::NiPoint3& a_targetPosition);
+		const RE::NiPoint3& a_authoredSegment,
+		const RE::NiPoint3* a_warpedSegment,
+		float a_actorYaw);
 
 	void DrawGroundProbe(
 		const RE::NiPoint3& a_predictedCenter,

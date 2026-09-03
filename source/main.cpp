@@ -43,7 +43,7 @@ namespace
 						"[AMR-DIAG][TrueHUD] Page Up: motion-warp visualization {}",
 						visible ? "shown" : "hidden");
 				} else if (key == static_cast<std::uint32_t>(
-						       RE::BSKeyboardDevice::Keys::kPageDown)) {
+									  RE::BSKeyboardDevice::Keys::kPageDown)) {
 					const bool visible = truehud::ToggleLedgeProtectionVisibility();
 					logger::info(
 						"[AMR-DIAG][TrueHUD] Page Down: ledge-protection visualization {}",
@@ -91,7 +91,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	}
 	settings::Init("AnimationMotionRevolution.ini");
 	logger::set_level(settings::debug::logLevel, settings::debug::logLevel);
-	logger::info("[AMR-DIAG] diagnostic build 2026-08-30-w; runtime {}", REL::Module::get().version().string());
+	logger::info("[AMR-DIAG] diagnostic build 2026-09-02-segments; runtime {}", REL::Module::get().version().string());
 
 	hooks::Install();
 
