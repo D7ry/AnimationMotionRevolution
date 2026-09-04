@@ -1,7 +1,7 @@
 # Animation Motion Revolution
 
 This fork ports alexsylex's Animation Motion Revolution to CommonLibSSE-NG 6.8.0
-and adds player root-motion safety and combat-target warping.
+and adds actor root-motion safety and combat-target warping.
 
 ## Runtime support
 
@@ -12,6 +12,12 @@ and adds player root-motion safety and combat-target warping.
 
 The CommonLibSSE-NG submodule is pinned to tag v6.8.0, commit
 44dd911486bc43b05b55a23781c7e471eef86542.
+
+The core root-motion features do not require behavior generation. The packaged
+behavior-graph variable integration requires Behavior Data Injector. On Skyrim
+AE 1.6.1170, install BDI v0.13 plus a compatible Behavior Data Injector Universal
+Support release, allowing Universal Support to overwrite the original BDI DLL.
+No Nemesis/Pandora patch is needed for the injected variable.
 
 ## New features
 
@@ -78,6 +84,21 @@ successive hit instead of aiming the entire animation only once. The INI can
 disable this default without disabling explicitly annotated segments. Default
 minimum/maximum scale and angle are independently configurable.
 
+### Behavior graph integration
+
+The package includes
+`SKSE/Plugins/BehaviorDataInjector/AnimationMotionRevolution_BDI.json`. Behavior
+Data Injector uses it to define the boolean graph variable
+`AMR_IsAnimationWarpingEnabled`, initially `false`, throughout behavior projects
+under `Data/Meshes/Actors`.
+
+AMR publishes `true` while an actor has at least one active animation clip whose
+motion warp is actually applicable. This includes a valid evaluation whose
+clamped scale is exactly 1. It publishes `false` after all of that actor's warp
+claims stop—for example at `animwarpend`, when the attack/target/gate conditions
+fail, or when the last warped clip deactivates. Claims are aggregated across
+blended clips so an unwarped clip cannot clear another active warped clip.
+
 ### TrueHUD debug visualization
 
 Configure with the single CMake option `AMR_ENABLE_TRUEHUD_DEBUG`, enabled by
@@ -97,8 +118,13 @@ drawn.
 Settings live in
 Data/SKSE/Plugins/AnimationMotionRevolution.ini.
 
-Full annotation documentation is available in
-[English](docs/animwarp.md), [Simplified Chinese](docs/animwarp.zh-CN.md), and
+Developer documentation for `animmotion`, `animrotation`, `animwarp`,
+`animwarpend`, and the behavior graph variable is available in
+[English](docs/developer-guide.md),
+[Simplified Chinese](docs/developer-guide.zh-CN.md), and
+[Korean](docs/developer-guide.ko-KR.md). The focused motion-warp reference remains
+available in [English](docs/animwarp.md),
+[Simplified Chinese](docs/animwarp.zh-CN.md), and
 [Korean](docs/animwarp.ko-KR.md).
 
 ## Build

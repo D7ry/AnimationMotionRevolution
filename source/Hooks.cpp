@@ -26,6 +26,21 @@ namespace hooks
 		constexpr float kMotionTimeEpsilon = 1.0e-4F;
 		constexpr float kVectorEpsilon = 1.0e-5F;
 
+		const RE::BSFixedString& GetWarpingGraphVariableName()
+		{
+			static const RE::BSFixedString name{ "AMR_IsAnimationWarpingEnabled" };
+			return name;
+		}
+
+		void SetWarpingGraphVariable(const RE::ActorHandle& a_actor, bool a_enabled)
+		{
+			if (const auto actor = a_actor.get()) {
+				// The BDI variable is an optional behavior integration. A failed setter
+				// must not disable the underlying root-motion warp.
+				actor->SetGraphVariableBool(GetWarpingGraphVariableName(), a_enabled);
+			}
+		}
+
 		class CharacterClipAnimMotionMap
 		{
 		public:
@@ -79,6 +94,28 @@ namespace hooks
 				}
 			}
 
+			bool AnyWarping(const RE::ActorHandle& a_actor) const
+			{
+				// The caller holds lock. Aggregate across hkbCharacter instances so an
+				// active-graph switch cannot clear another claim owned by this actor.
+				if (!a_actor) {
+					return false;
+				}
+
+				for (const auto& [character, clips] : data) {
+					(void)character;
+					if (std::ranges::any_of(
+							clips,
+							[&a_actor](const auto& a_entry) {
+								const auto& state = a_entry.second.translationRuntime;
+								return state.wasWarping && state.owner == a_actor;
+							})) {
+						return true;
+					}
+				}
+				return false;
+			}
+
 			RE::BSSpinLock lock;
 
 		private:
@@ -125,6 +162,13 @@ namespace hooks
 			if (existing && existing->animation == boundAnimation) {
 				++existing->activeCount;
 				return g_computeStartTime(a_clip);
+			}
+			if (existing) {
+				const auto displacedOwner = existing->translationRuntime.owner;
+				motionMap->Remove(hkbCharacter, a_clip->name);
+				SetWarpingGraphVariable(
+					displacedOwner,
+					motionMap->AnyWarping(displacedOwner));
 			}
 
 			AnimMotionData parsed{ boundAnimation };
@@ -281,7 +325,9 @@ namespace hooks
 				if (motionData && motionData->animation == boundAnimation) {
 					--motionData->activeCount;
 					if (motionData->activeCount <= 0) {
+						const auto owner = motionData->translationRuntime.owner;
 						motionMap->Remove(hkbCharacter, a_clip->name);
+						SetWarpingGraphVariable(owner, motionMap->AnyWarping(owner));
 					}
 				}
 			}
@@ -448,6 +494,7 @@ namespace hooks
 			a_state.initialized = true;
 			a_state.wasAttacking = a_character->IsAttacking();
 			a_state.previousMotionTime = -1.0F;
+			a_state.owner = a_character->GetHandle();
 			a_state.target = a_character->GetActorRuntimeData().currentCombatTarget;
 		}
 
@@ -994,12 +1041,16 @@ namespace hooks
 
 			if (motionData &&
 				SampleTranslation(motionData->translationList, a_motionTime, a_translation)) {
+				motionData->translationRuntime.owner = a_character->GetHandle();
 				ApplyTranslationModifiers(
 					*motionData,
 					a_motionTime,
 					a_character,
 					a_translation,
 					a_clipName->c_str());
+				SetWarpingGraphVariable(
+					motionData->translationRuntime.owner,
+					motionMap->AnyWarping(motionData->translationRuntime.owner));
 				return;
 			}
 

@@ -1,0 +1,8 @@
+[
+  {
+    "projectPath": "Actors",
+    "type": "kBool",
+    "name": "AMR_IsAnimationWarpingEnabled",
+    "value": false
+  }
+]

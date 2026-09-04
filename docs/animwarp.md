@@ -46,7 +46,7 @@ Disables motion warping from this timestamp until a later `animwarp`.
 
     animwarp 1 1
 
-This is exactly synonymous with `animwarpend`. Angle or distance arguments do not change that meaning.
+This is exactly synonymous with `animwarpend`. Valid optional angle or distance arguments do not change that meaning; invalid optional values still make the annotation malformed.
 
 ## 3. Segmentation
 

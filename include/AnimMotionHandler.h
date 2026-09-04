@@ -38,6 +38,7 @@ public:
 		float previousMotionTime{ -1.0F };
 		float warpScale{ -1.0F };
 		std::size_t activeWarpSegmentIndex{ std::numeric_limits<std::size_t>::max() };
+		RE::ActorHandle owner{};
 		RE::ActorHandle target{};
 		RE::NiPoint3 blockedOffset{};
 		RE::NiPoint3 lastAuthored{};
